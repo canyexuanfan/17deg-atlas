@@ -1,0 +1,4 @@
+interface:
+  display_name: "17deg Atlas Remote"
+  short_description: "在远端 Agent 中安全连接并使用你的个人知识库"
+  default_prompt: "Use $17deg-atlas-remote to connect this remote Agent to my knowledge base and complete my request safely."

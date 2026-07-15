@@ -1,0 +1,7 @@
+interface:
+  display_name: "17deg Atlas Compatibility"
+  short_description: "17deg Atlas 的内部兼容能力"
+  default_prompt: "Use $17deg-atlas-local or $17deg-atlas-remote for knowledge workspace setup and daily use."
+
+policy:
+  allow_implicit_invocation: false

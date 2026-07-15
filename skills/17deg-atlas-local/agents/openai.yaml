@@ -1,0 +1,4 @@
+interface:
+  display_name: "17deg Atlas Local"
+  short_description: "在本地 Agent 中创建、整理并检索你的个人知识库"
+  default_prompt: "Use $17deg-atlas-local to create or connect my local knowledge base, request confirmation for GitHub actions, and verify the standard setup."
