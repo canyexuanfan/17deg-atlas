@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://17deg.atlas/schemas/personal-domain-instance.schema.json",
+  "title": "Personal Domain Instance",
+  "description": "Description of a personal domain instance root manifest.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "instance_id",
+    "domain_kind",
+    "subject_kind",
+    "subject_id",
+    "layout_kind",
+    "repository",
+    "modules"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Manifest schema version."
+    },
+    "instance_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this personal domain instance."
+    },
+    "domain_kind": {
+      "type": "string",
+      "const": "personal",
+      "description": "Kind of domain. Always personal for this manifest."
+    },
+    "subject_kind": {
+      "type": "string",
+      "const": "person",
+      "description": "Kind of subject. Always person for this manifest."
+    },
+    "subject_id": {
+      "type": "string",
+      "description": "Identifier of the subject this domain belongs to."
+    },
+    "layout_kind": {
+      "type": "string",
+      "const": "domain-root",
+      "description": "Layout kind. Always domain-root for this manifest."
+    },
+    "repository": {
+      "type": "object",
+      "description": "Basic information about this repository.",
+      "additionalProperties": true,
+      "properties": {
+        "owner": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "public", "unknown"]
+        }
+      }
+    },
+    "modules": {
+      "type": "array",
+      "description": "Enabled modules in this personal domain instance.",
+      "items": {
+        "type": "object",
+        "required": [
+          "module_kind",
+          "path",
+          "module_instance_id"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "module_kind": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Kind of this module."
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository-relative path to this module."
+          },
+          "module_instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique identifier for this module instance."
+          }
+        }
+      }
+    }
+  }
+}

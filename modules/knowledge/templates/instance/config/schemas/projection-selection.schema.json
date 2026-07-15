@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Content projection selection",
+  "type": "object",
+  "required": ["selection_version", "entries"],
+  "properties": {
+    "selection_version": {"const": 1},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["object_id", "distribution", "target", "license_id", "human_confirmed", "confirmed_at"],
+        "properties": {
+          "object_id": {"type": "string", "pattern": "^obj_[a-z0-9_-]+$"},
+          "distribution": {"enum": ["local-only", "projection-plaintext", "projection-ciphertext", "service-only"]},
+          "target": {"type": "string"},
+          "license_id": {"type": "string", "minLength": 1},
+          "human_confirmed": {"const": true},
+          "confirmed_at": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

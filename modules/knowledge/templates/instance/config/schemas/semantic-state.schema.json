@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/semantic-state-v1",
+  "title": "KB2 rebuildable taxonomy state",
+  "type": "object",
+  "required": ["schema_version", "topics", "decisions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "topics": {"type": "array", "items": {"type": "object"}},
+    "decisions": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": false
+}

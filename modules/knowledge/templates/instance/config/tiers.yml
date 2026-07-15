@@ -1,0 +1,9 @@
+{
+  "tiers": {
+    "public": {"display_name": "公开区", "encrypted": false, "path": "vault/public"},
+    "archive": {"display_name": "归档区", "encrypted": false, "path": "vault/archive"},
+    "basic": {"display_name": "基础区", "encrypted": true, "recipient_env": "KB_AGE_RECIPIENT_BASIC", "identity_env": "KB_AGE_IDENTITY_BASIC", "path": "vault/basic"},
+    "advanced": {"display_name": "进阶区", "encrypted": true, "recipient_env": "KB_AGE_RECIPIENT_ADVANCED", "identity_env": "KB_AGE_IDENTITY_ADVANCED", "path": "vault/advanced"},
+    "core": {"display_name": "核心区", "encrypted": true, "recipient_env": "KB_AGE_RECIPIENT_CORE", "identity_env": "KB_AGE_IDENTITY_CORE", "path": "vault/core"}
+  }
+}

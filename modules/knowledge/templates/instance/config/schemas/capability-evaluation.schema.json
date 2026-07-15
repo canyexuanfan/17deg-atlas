@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/capability-evaluation-v1",
+  "title": "Capability evaluation manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "capability_id", "version", "cases", "contract_fingerprint"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "capability_id": {"type": "string", "pattern": "^cap_"},
+    "version": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*$"},
+    "cases": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {"id": {"type": "string", "minLength": 1}}
+      }
+    },
+    "contract_fingerprint": {"type": "string", "pattern": "^sha256:"}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "repo_name": "my-knowledge-content",
+  "projection_mode": "content-repository",
+  "knowledge_namespace": "knowledge",
+  "producer_name": "knowledge",
+  "selection_file": "manifests/projection-selection.json",
+  "manifest_file": "projection-manifest.json",
+  "template_dir": "templates/projection",
+  "remote_policy": {
+    "allowed_owner": "",
+    "allowed_repo": "",
+    "allowed_branch": "main"
+  },
+  "include_private_plaintext": false,
+  "include_receipts": false,
+  "include_instance_code": false,
+  "include_read_only_client": true
+}

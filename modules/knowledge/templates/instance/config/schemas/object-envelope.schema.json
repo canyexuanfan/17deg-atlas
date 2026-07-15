@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/object-envelope-v3",
+  "title": "KB object envelope v1/v2/v3 dual-read contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "object_id",
+    "object_kind",
+    "tier",
+    "title",
+    "summary",
+    "source_ids",
+    "source_uri",
+    "content_hash",
+    "created_at",
+    "updated_at",
+    "rights",
+    "maturity",
+    "lifecycle",
+    "catalog_visibility",
+    "human_confirmed",
+    "content"
+  ],
+  "properties": {
+    "schema_version": {"enum": [1, 2, 3, 4]},
+    "object_id": {"type": "string", "pattern": "^obj_[a-z0-9_-]+$"},
+    "object_kind": {"enum": ["source_profile", "subscription", "capture_event", "raw", "wiki", "release", "run", "feedback"]},
+    "tier": {"enum": ["public", "archive", "basic", "advanced", "core"]},
+    "title": {"type": "string", "minLength": 1},
+    "summary": {"type": "string"},
+    "source_ids": {"type": "array", "items": {"type": "string"}},
+    "source_uri": {"type": "string"},
+    "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "rights": {"enum": ["owned", "licensed", "restricted", "unknown"]},
+    "maturity": {"enum": ["seed", "draft", "reviewed", "verified"]},
+    "lifecycle": {"enum": ["active", "superseded", "archived", "revoked"]},
+    "catalog_visibility": {"enum": ["public", "private", "none"]},
+    "human_confirmed": {"type": "boolean"},
+    "classification": {
+      "type": "object",
+      "required": ["level", "reason", "authority", "classified_at", "reviewed_at"],
+      "properties": {
+        "level": {"enum": ["public", "basic", "advanced", "core"]},
+        "reason": {"type": "string", "minLength": 1},
+        "authority": {"type": "string", "minLength": 1},
+        "classified_at": {"type": "string", "minLength": 1},
+        "reviewed_at": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "storage_binding": {
+      "type": "object",
+      "required": ["backend", "content_ref", "encryption_profile", "key_version", "content_hash"],
+      "properties": {
+        "backend": {"enum": ["local-git", "github", "object-store", "controlled-service"]},
+        "content_ref": {"type": "string", "minLength": 1},
+        "encryption_profile": {"enum": ["plaintext", "age-basic-v1", "age-advanced-v1", "age-core-v1", "managed"]},
+        "key_version": {"type": "string", "minLength": 1},
+        "content_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "policy_refs": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "distribution_decision": {
+      "type": "object",
+      "required": ["channel", "audience", "license_id", "approved_by", "approved_at"],
+      "properties": {
+        "channel": {"enum": ["local-only", "public-plaintext", "public-ciphertext", "controlled-channel"]},
+        "audience": {"type": "array", "items": {"type": "string"}},
+        "license_id": {"type": ["string", "null"]},
+        "approved_by": {"type": ["string", "null"]},
+        "approved_at": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "media_type": {"type": ["string", "null"], "enum": ["article", "screenshot", "site", "data", "book", "transcript", "idea", "conversation", "file", null]},
+    "capture_purpose": {"type": ["string", "null"], "enum": ["trend", "deep_learning", "case", "demand", "feedback", "reference", null]},
+    "wiki_kind": {"type": ["string", "null"], "enum": ["source_summary", "atomic_card", "topic_page", null]},
+    "card_kind": {"type": ["string", "null"], "enum": ["concept", "claim", "question", "pattern", "practice", "case", "decision", null]},
+    "topic_ids": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^topic_[a-z0-9_-]+$"},
+      "uniqueItems": true
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relation_id", "type", "target_id", "statement", "evidence_ids", "review_state", "created_by"],
+        "properties": {
+          "relation_id": {"type": "string", "pattern": "^rel_[a-z0-9_-]+$"},
+          "type": {"enum": ["derived_from", "authored_by", "edited_by", "coauthored_with", "ai_assisted_by", "publishes", "selected_for", "supports", "contradicts", "example_of", "causes", "applies_to", "updates", "supersedes"]},
+          "target_id": {"type": "string", "minLength": 1},
+          "statement": {"type": "string", "minLength": 1},
+          "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "review_state": {"enum": ["candidate", "reviewed", "verified"]},
+          "created_by": {"enum": ["human", "agent", "importer"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "capture_state": {"type": ["string", "null"], "enum": ["captured", "queued", "accepted", "rejected", "duplicate", "failed", null]},
+    "compile_state": {"type": ["string", "null"], "enum": ["uncompiled", "compiling", "compiled", "needs_recompile", "failed", null]},
+    "review_state": {"enum": ["candidate", "reviewed", "verified", "rejected"]},
+    "origin_kind": {"enum": ["self", "external", "mixed", "unknown"]},
+    "authorship_status": {"enum": ["self_authored", "edited", "coauthored", "ai_assisted", "external", "unknown"]},
+    "contributors": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "source_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "intended_role": {"enum": ["evidence", "knowledge", "creation", "cognition", "work", "publication", "unknown"]},
+    "corpus_eligibility": {"enum": ["denied", "candidate", "approved"]},
+    "style_eligibility": {"enum": ["denied", "candidate", "approved"]},
+    "training_permission": {"enum": ["denied", "undecided", "allowed"]},
+    "clarification_status": {"enum": ["not_needed", "required", "answered"]},
+    "clarification_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "content": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": 2}}},
+      "then": {
+        "required": ["classification", "storage_binding", "policy_refs", "distribution_decision"]
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 3}}},
+      "then": {
+        "required": [
+          "classification", "storage_binding", "policy_refs", "distribution_decision",
+          "media_type", "capture_purpose", "wiki_kind", "card_kind", "topic_ids",
+          "relations", "capture_state", "compile_state", "review_state"
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 4}}},
+      "then": {
+        "required": [
+          "classification", "storage_binding", "policy_refs", "distribution_decision",
+          "media_type", "capture_purpose", "wiki_kind", "card_kind", "topic_ids",
+          "relations", "capture_state", "compile_state", "review_state",
+          "origin_kind", "authorship_status", "contributors", "source_refs",
+          "intended_role", "corpus_eligibility", "style_eligibility",
+          "training_permission", "clarification_status", "clarification_refs"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

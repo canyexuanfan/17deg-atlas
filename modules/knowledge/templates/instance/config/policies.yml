@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "public_catalog": {"requires_visibility": "public", "requires_human_confirmed": true},
+  "private_catalog_path": ".local/private-index/catalog.jsonl",
+  "authorized_index_path": ".local/private-index/authorized.jsonl",
+  "allowed_kinds": ["raw", "wiki", "release"],
+  "manual_confirmation_actions": ["move-to-lower-tier", "release", "delete"],
+  "remote_runtime_may_receive_identity": false,
+  "publishing": {
+    "mode": "explicit-content-projection",
+    "instance_remote_allowed": false,
+    "selection_required": true,
+    "include_private_plaintext": false
+  },
+  "index_writer": "kb.py",
+  "search_backend": "jsonl-substring-v1",
+  "trusted_search_backend": "sqlite-fts5-v1",
+  "trusted_search_scopes": ["private", "collaboration", "public"],
+  "capability_deployment": {
+    "default_scope": "ask",
+    "allowed_scopes": ["project", "global", "runtime-native", "ask"],
+    "global_requires_confirmation": true
+  }
+}

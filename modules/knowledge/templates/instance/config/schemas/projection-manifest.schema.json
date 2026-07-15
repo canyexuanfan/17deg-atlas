@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Content projection manifest",
+  "type": "object",
+  "required": ["schema_version", "repo_name", "projection_mode", "producers", "files"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "repo_name": {"type": "string", "minLength": 1},
+    "projection_mode": {"type": "string", "minLength": 1},
+    "producers": {"type": "array"},
+    "files": {"type": "array"}
+  },
+  "additionalProperties": false
+}

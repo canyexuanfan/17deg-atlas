@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/capability-spec-v1",
+  "title": "CapabilitySpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "object_type", "capability_kind", "capability_id", "version",
+    "name", "slug", "purpose", "triggers", "input_contract", "output_contract",
+    "knowledge_refs", "evidence_refs", "instructions", "model_requirements",
+    "tool_permissions", "side_effects", "constraints", "failure_policy",
+    "evaluation_suite", "runtime_targets", "authority_required", "review_state",
+    "classification", "rights", "distribution_decision", "lifecycle"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "object_type": {"const": "capability"},
+    "capability_kind": {"const": "skill"},
+    "capability_id": {"type": "string", "pattern": "^cap_[a-z0-9_-]+$"},
+    "version": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*$"},
+    "name": {"type": "string", "minLength": 1},
+    "slug": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64},
+    "purpose": {"type": "string", "minLength": 1},
+    "triggers": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "input_contract": {"type": "object"},
+    "output_contract": {"type": "object"},
+    "knowledge_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^obj_"}},
+    "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^obj_"}},
+    "instructions": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "model_requirements": {"type": "array", "items": {"type": "string"}},
+    "tool_permissions": {"type": "array", "items": {"type": "string"}},
+    "side_effects": {"type": "array", "items": {"type": "string"}},
+    "constraints": {"type": "array", "items": {"type": "string"}},
+    "failure_policy": {"type": "string", "minLength": 1},
+    "evaluation_suite": {"type": "array", "minItems": 2, "items": {"type": "object", "required": ["id"]}},
+    "runtime_targets": {"type": "array", "minItems": 1, "items": {"enum": ["codex", "claude", "hermes", "generic"]}},
+    "authority_required": {"type": "string", "minLength": 1},
+    "review_state": {"enum": ["candidate", "reviewed", "verified", "rejected", "needs-evidence"]},
+    "classification": {
+      "type": "object", "additionalProperties": false, "required": ["level"],
+      "properties": {"level": {"enum": ["public", "basic", "advanced", "core"]}}
+    },
+    "rights": {"enum": ["owned", "licensed"]},
+    "distribution_decision": {
+      "type": "object", "additionalProperties": false, "required": ["channel", "audience"],
+      "properties": {
+        "channel": {"enum": ["local-only", "public-plaintext", "controlled-channel"]},
+        "audience": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "lifecycle": {"enum": ["active", "deprecated", "revoked", "archived"]}
+  }
+}

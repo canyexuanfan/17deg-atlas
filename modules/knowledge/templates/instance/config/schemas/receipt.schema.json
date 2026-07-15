@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/receipt-v1",
+  "type": "object",
+  "required": ["schema_version", "receipt_id", "request_id", "action", "status", "object_ids", "paths", "created_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "receipt_id": {"type": "string"},
+    "request_id": {"type": "string"},
+    "action": {"type": "string"},
+    "status": {"enum": ["success", "needs-clarification", "failed", "conflict"]},
+    "object_ids": {"type": "array", "items": {"type": "string"}},
+    "paths": {"type": "array", "items": {"type": "string"}},
+    "created_at": {"type": "string"},
+    "details": {"type": "object"}
+  },
+  "additionalProperties": false
+}

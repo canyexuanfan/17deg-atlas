@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/public-projection-v1",
+  "type": "object",
+  "required": ["schema_version", "object_id", "object_kind", "tier", "title", "summary", "path", "content_hash", "updated_at", "human_confirmed"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "object_id": {"type": "string"},
+    "object_kind": {"enum": ["raw", "wiki", "release"]},
+    "tier": {"enum": ["basic", "advanced", "core"]},
+    "title": {"type": "string", "minLength": 1},
+    "summary": {"type": "string"},
+    "path": {"type": "string"},
+    "content_hash": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "human_confirmed": {"const": true}
+  },
+  "additionalProperties": false
+}

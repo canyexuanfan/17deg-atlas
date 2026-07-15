@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/capability-event-v1",
+  "title": "Capability governance event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_type"],
+  "properties": {
+    "event_type": {
+      "enum": [
+        "capability-proposal", "capability-review", "capability-deployment",
+        "capability-run", "capability-feedback", "capability-status"
+      ]
+    },
+    "capability_id": {"type": "string", "pattern": "^cap_"},
+    "version": {"type": "string"},
+    "spec": {"type": "object"},
+    "proposal_object_id": {"type": "string", "pattern": "^obj_"},
+    "decision": {"type": "string"},
+    "note": {"type": "string"},
+    "notes": {"type": "string"},
+    "runtime": {"enum": ["codex", "claude", "hermes", "generic"]},
+    "scope": {"enum": ["project", "global", "runtime-native"]},
+    "target_path": {"type": "string"},
+    "logical_fingerprint": {"type": "string"},
+    "discovered": {"type": "boolean"},
+    "goal_summary": {"type": "string"},
+    "input_summary": {"type": "string"},
+    "output_hash": {"type": "string"},
+    "outcome": {"type": "string"},
+    "model": {"type": "string"},
+    "authority": {"type": "string"},
+    "granted_tools": {"type": "array", "items": {"type": "string"}},
+    "knowledge_refs": {"type": "array", "items": {"type": "string"}},
+    "side_effect_receipts": {"type": "array", "items": {"type": "string"}},
+    "run_object_id": {"type": "string", "pattern": "^obj_"},
+    "improvement": {"type": "string"},
+    "confirmed": {"type": "boolean"},
+    "lifecycle": {"enum": ["active", "deprecated", "revoked", "archived"]}
+  }
+}

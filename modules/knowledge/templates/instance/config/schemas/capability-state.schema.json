@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/capability-state-v1",
+  "title": "Rebuildable capability registry state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "capabilities", "active", "fingerprint"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "capabilities": {"type": "integer", "minimum": 0},
+    "active": {"type": "integer", "minimum": 0},
+    "fingerprint": {"type": "string", "pattern": "^sha256:"}
+  }
+}

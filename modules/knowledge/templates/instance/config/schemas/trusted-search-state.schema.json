@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/trusted-search-state-v1",
+  "title": "KB3 local trusted search state",
+  "type": "object",
+  "required": ["schema_version", "built_at", "authorized_tiers", "directories", "indexes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "built_at": {"type": "string"},
+    "authorized_tiers": {"type": "array", "items": {"enum": ["public", "archive", "basic", "advanced", "core"]}, "uniqueItems": true},
+    "directories": {
+      "type": "object",
+      "required": ["private", "collaboration", "public"],
+      "properties": {
+        "private": {"type": "integer", "minimum": 0},
+        "collaboration": {"type": "integer", "minimum": 0},
+        "public": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "indexes": {
+      "type": "object",
+      "required": ["private", "collaboration", "public"],
+      "properties": {
+        "private": {"$ref": "#/$defs/index"},
+        "collaboration": {"$ref": "#/$defs/index"},
+        "public": {"$ref": "#/$defs/index"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "index": {
+      "type": "object",
+      "required": ["scope", "records", "tokenizer", "fingerprint", "path"],
+      "properties": {
+        "scope": {"enum": ["private", "collaboration", "public"]},
+        "records": {"type": "integer", "minimum": 0},
+        "tokenizer": {"enum": ["trigram", "unicode61"]},
+        "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "path": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

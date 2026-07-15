@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://17deg.example/schemas/instance-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "instance_id",
+    "domain_kind",
+    "subject_kind",
+    "subject_id",
+    "module_kind",
+    "layout_kind",
+    "repository"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "instance_id": {"type": "string", "minLength": 1},
+    "domain_kind": {"const": "personal"},
+    "subject_kind": {"const": "person"},
+    "subject_id": {"type": "string"},
+    "module_kind": {"const": "knowledge"},
+    "layout_kind": {"const": "module-root"},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "owner": {"type": "string"},
+        "name": {"type": "string"},
+        "branch": {"type": "string"},
+        "visibility": {"enum": ["private", "public", "unknown"]}
+      }
+    }
+  }
+}

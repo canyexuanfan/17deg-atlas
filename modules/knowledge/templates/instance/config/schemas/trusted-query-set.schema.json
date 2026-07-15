@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/trusted-query-set-v1",
+  "title": "KB3 trusted retrieval query set",
+  "type": "object",
+  "required": ["version", "cases"],
+  "properties": {
+    "version": {"type": "integer", "const": 1},
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["query", "expected_ids"],
+        "properties": {
+          "query": {"type": "string"},
+          "scope": {"enum": ["private", "collaboration", "public"]},
+          "top_k": {"type": "integer", "minimum": 1, "maximum": 100},
+          "expected_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": true},
+          "filters": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

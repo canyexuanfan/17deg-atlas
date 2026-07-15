@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/trusted-evaluation-v1",
+  "title": "KB3 trusted retrieval evaluation report",
+  "type": "object",
+  "required": ["status", "query_set_version", "cases", "hit_at_k", "recall_at_k", "mrr", "failures", "details"],
+  "properties": {
+    "status": {"const": "ok"},
+    "query_set_version": {"type": "integer"},
+    "cases": {"type": "integer", "minimum": 1},
+    "hit_at_k": {"type": "number", "minimum": 0, "maximum": 1},
+    "recall_at_k": {"type": "number", "minimum": 0, "maximum": 1},
+    "mrr": {"type": "number", "minimum": 0, "maximum": 1},
+    "failures": {"type": "array", "items": {"type": "object"}},
+    "details": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": false
+}

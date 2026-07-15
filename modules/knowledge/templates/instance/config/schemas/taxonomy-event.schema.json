@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/taxonomy-event-v1",
+  "title": "KB2 taxonomy proposal and review event",
+  "type": "object",
+  "required": ["event_type"],
+  "properties": {
+    "event_type": {"enum": ["taxonomy-proposal", "taxonomy-review"]},
+    "topic": {"$ref": "#/$defs/topic"},
+    "evidence_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "proposal_object_id": {"type": "string", "pattern": "^obj_[a-z0-9_-]+$"},
+    "decision": {"enum": ["active", "merged", "deprecated", "rejected"]},
+    "reviewed_by": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_type": {"const": "taxonomy-proposal"}}},
+      "then": {"required": ["topic", "evidence_ids"]}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "taxonomy-review"}}},
+      "then": {"required": ["topic", "proposal_object_id", "decision", "reviewed_by"]}
+    }
+  ],
+  "$defs": {
+    "topic": {
+      "type": "object",
+      "required": ["topic_id", "name", "aliases", "definition", "parent_ids", "state", "successor_ids"],
+      "properties": {
+        "topic_id": {"type": "string", "pattern": "^topic_[a-z0-9_-]+$"},
+        "name": {"type": "string", "minLength": 1},
+        "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "definition": {"type": "string", "minLength": 1},
+        "parent_ids": {"type": "array", "items": {"type": "string", "pattern": "^topic_[a-z0-9_-]+$"}, "uniqueItems": true},
+        "state": {"enum": ["proposed", "active", "merged", "deprecated"]},
+        "successor_ids": {"type": "array", "items": {"type": "string", "pattern": "^topic_[a-z0-9_-]+$"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/governance-event-v1",
+  "title": "KB2 review, run, recompile and health event",
+  "type": "object",
+  "required": ["event_type"],
+  "properties": {
+    "event_type": {
+      "enum": [
+        "relation-review",
+        "knowledge-review",
+        "review-package",
+        "knowledge-run",
+        "recompile-completed",
+        "semantic-health-check"
+      ]
+    },
+    "source_object_id": {"type": "string", "pattern": "^obj_[a-z0-9_-]+$"},
+    "candidate_object_id": {"type": "string", "pattern": "^obj_[a-z0-9_-]+$"},
+    "target_object_id": {"type": "string", "pattern": "^obj_[a-z0-9_-]+$"},
+    "relation_id": {"type": "string", "pattern": "^rel_[a-z0-9_-]+$"},
+    "decision": {"enum": ["reviewed", "verified", "rejected"]},
+    "note": {"type": "string"},
+    "relation": {"type": "object"},
+    "reviewed_by": {"type": "string", "minLength": 1},
+    "candidate_object_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "taxonomy_proposal_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "relations": {"type": "array", "items": {"type": "object"}},
+    "checks": {"type": "object"},
+    "operation": {"type": "string", "minLength": 1},
+    "outcome": {"enum": ["success", "partial", "failure"]},
+    "input_object_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "output_object_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "notes": {"type": "string"},
+    "feedback_object_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "raw_object_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "old_object_preserved": {"type": "boolean"},
+    "issue_count": {"type": "integer", "minimum": 0},
+    "issues": {"type": "array", "items": {"type": "object"}},
+    "knowledge_modified": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_type": {"const": "relation-review"}}},
+      "then": {"required": ["source_object_id", "relation_id", "decision", "note", "relation", "reviewed_by"]}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "knowledge-review"}}},
+      "then": {"required": ["candidate_object_id", "decision", "note", "reviewed_by"]}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "review-package"}}},
+      "then": {"required": ["candidate_object_ids", "taxonomy_proposal_ids", "relations", "checks"]}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "knowledge-run"}}},
+      "then": {"required": ["operation", "outcome", "input_object_ids", "output_object_ids", "notes"]}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "recompile-completed"}}},
+      "then": {"required": ["target_object_id", "feedback_object_ids", "raw_object_ids", "candidate_object_ids", "old_object_preserved"]}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "semantic-health-check"}}},
+      "then": {"required": ["issue_count", "issues", "knowledge_modified"]}
+    }
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/capability-deployment-v1",
+  "title": "SkillDeployment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "capability_id", "version", "runtime", "scope", "target_path", "logical_fingerprint", "discovered"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "capability_id": {"type": "string", "pattern": "^cap_"},
+    "version": {"type": "string"},
+    "runtime": {"enum": ["codex", "claude", "hermes", "generic"]},
+    "scope": {"enum": ["project", "global", "runtime-native"]},
+    "target_path": {"type": "string", "minLength": 1},
+    "logical_fingerprint": {"type": "string", "pattern": "^sha256:"},
+    "discovered": {"type": "boolean"}
+  }
+}

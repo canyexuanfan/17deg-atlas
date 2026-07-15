@@ -1,0 +1,8 @@
+# Local runtime and editor artifacts
+.17deg-atlas/
+.atlas/
+.local/
+.DS_Store
+Thumbs.db
+*.tmp
+*.log

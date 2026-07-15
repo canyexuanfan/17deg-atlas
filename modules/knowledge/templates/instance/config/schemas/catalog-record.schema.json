@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/catalog-record-v1",
+  "type": "object",
+  "required": ["schema_version", "object_id", "object_kind", "tier", "title", "summary", "path", "content_hash", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "object_id": {"type": "string"},
+    "object_kind": {"type": "string"},
+    "tier": {"enum": ["public", "archive", "basic", "advanced", "core"]},
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "path": {"type": "string"},
+    "content_hash": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "locked": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}

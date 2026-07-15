@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/hermes-request-v1",
+  "type": "object",
+  "required": ["schema_version", "request_id", "action", "payload"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "minLength": 1},
+    "action": {"enum": ["add", "list", "search"]},
+    "payload": {"type": "object"},
+    "runtime": {"const": "hermes"}
+  },
+  "additionalProperties": false
+}

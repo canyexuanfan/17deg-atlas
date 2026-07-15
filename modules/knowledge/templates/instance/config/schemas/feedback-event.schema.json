@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kb://schemas/feedback-event-v1",
+  "title": "KB2 knowledge feedback event",
+  "type": "object",
+  "required": ["event_type", "target_object_id", "run_object_id", "outcome", "notes", "applicability", "trigger_recompile"],
+  "properties": {
+    "event_type": {"const": "knowledge-feedback"},
+    "target_object_id": {"type": "string", "pattern": "^obj_[a-z0-9_-]+$"},
+    "run_object_id": {"type": ["string", "null"], "pattern": "^obj_[a-z0-9_-]+$"},
+    "outcome": {"enum": ["success", "failure", "partial", "outdated", "contradicted"]},
+    "notes": {"type": "string"},
+    "applicability": {
+      "type": "object",
+      "required": ["add", "remove"],
+      "properties": {
+        "add": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "remove": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
+    "trigger_recompile": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}
