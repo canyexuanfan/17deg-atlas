@@ -14,6 +14,11 @@ WORKSPACE_ACTIONS = {
     "init": "init-instance",
     "plan": "agent-start-plan",
     "start": "agent-start",
+    "migration-source": "agent-migration-source",
+    "migration-plan": "agent-migration-plan",
+    "migration-start": "agent-migration-start",
+    "retirement-plan": "agent-retirement-plan",
+    "retirement-start": "agent-retirement-start",
 }
 KNOWLEDGE_GLOBAL_OPTIONS = ("--root", "--age-path")
 
@@ -26,6 +31,7 @@ def _print_help() -> None:
                 "",
                 "Usage:",
                 "  17deg-atlas workspace <init|plan|start> [options]",
+                "  17deg-atlas workspace <migration-source|migration-plan|migration-start|retirement-plan|retirement-start> [options]",
                 "  17deg-atlas knowledge <command> [options]",
                 "  17deg-atlas remote <command> [options]",
             )
@@ -85,7 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         return knowledge_main(args)
     if surface == "workspace":
         if not args or args[0] in ("-h", "--help"):
-            print("Usage: 17deg-atlas workspace <init|plan|start> [options]")
+            print(
+                "Usage: 17deg-atlas workspace <init|plan|start> [options]\n"
+                "       17deg-atlas workspace <migration-source|migration-plan|migration-start|retirement-plan|retirement-start> [options]"
+            )
             return 0
         action = args.pop(0)
         mapped = WORKSPACE_ACTIONS.get(action)

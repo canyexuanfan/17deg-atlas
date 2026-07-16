@@ -349,9 +349,18 @@ class ProductizationAcceptanceTests(unittest.TestCase):
         self.assertIn("不得自行追加 `doctor`", local_skill)
         self.assertIn("不安装到全局 Skill 目录", local_skill)
         self.assertIn("用户未明确选择前禁止新建、连接或迁移", local_skill)
+        self.assertIn("workspace migration-source", local_skill)
+        self.assertIn("workspace migration-plan", local_skill)
+        self.assertIn("workspace migration-start", local_skill)
+        self.assertIn("missing_identity_tiers", local_skill)
+        self.assertIn("workspace retirement-plan", local_skill)
+        self.assertIn("workspace retirement-start", local_skill)
+        self.assertIn("新建空实例（明确不复制旧内容）", local_skill)
         self.assertIn("onboarding_complete: true", remote_skill)
         self.assertIn("terminal_state: complete", remote_skill)
         self.assertIn("用户未明确选择前禁止新建、连接或迁移", remote_skill)
+        self.assertIn("execution_entry=local", remote_skill)
+        self.assertIn("新建空实例不会复制旧实例的任何内容", remote_skill)
 
 
 if __name__ == "__main__":

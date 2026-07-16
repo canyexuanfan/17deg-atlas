@@ -231,6 +231,15 @@ class GitHubRepositoryClient:
             "html_url": str(payload.get("html_url", f"https://github.com/{owner}/{repo_name}")),
         }
 
+    def delete_repository(self, owner: str, name: str) -> None:
+        status, _payload = self._request(
+            "DELETE", f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
+        )
+        if status != 204:
+            raise KBError("GitHub repository deletion failed")
+        if self.repository(owner, name) is not None:
+            raise KBError("GitHub repository deletion could not be verified")
+
     def repositories(self) -> list[dict[str, Any]]:
         status, payload = self._request(
             "GET",
@@ -561,6 +570,13 @@ query($login: String!) {
         result = self._run(["repo", "clone", f"{owner}/{name}", str(target)])
         if result.returncode != 0:
             raise KBError("GitHub knowledge repository clone failed")
+
+    def delete_repository(self, owner: str, name: str) -> None:
+        result = self._run(["repo", "delete", f"{owner}/{name}", "--yes"])
+        if result.returncode != 0:
+            raise KBError("GitHub repository deletion failed")
+        if self.repository(owner, name) is not None:
+            raise KBError("GitHub repository deletion could not be verified")
 
 
 class GitHubCLIEnvironment:

@@ -424,6 +424,7 @@ def github_first_plan(
     else:
         active = _github_client(client, token=token)
     account = active.account()
+    resolved_runtime = detect_agent_runtime(runtime)
     discovered_layout = "unknown"
     remembered = configured_repository(Path(workspace["root"]))
     if remembered:
@@ -533,20 +534,31 @@ def github_first_plan(
         )
         confirmations = [
             *dependency_confirmations,
-            "select-legacy-or-current-instance",
+            "select-migration-legacy-or-empty-current-instance",
         ]
         return {
             "status": "needs-confirmation",
             "flow": "agent-onboarding",
-            "runtime": detect_agent_runtime(runtime),
+            "runtime": resolved_runtime,
             "domain_kind": "personal",
             "module_kind": "knowledge",
             "subject_id": f"person:github:{account['login']}",
             "workspace": workspace["root"],
             "workspace_state": workspace["state"],
             "repository": None,
-            "repository_action": "select-legacy-or-current-instance",
+            "repository_action": "select-legacy-migration-or-current-instance",
             "repository_options": [
+                {
+                    "choice": "migrate-current",
+                    "repository": f"{account['login']}/{DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME}",
+                    "target": str(modern_target.resolve()),
+                    "layout": "current",
+                    "recommended": True,
+                    "source_repository": f"{owner}/{repo}",
+                    "source_target": legacy_target,
+                    "next_action": "migration-plan",
+                    "execution_entry": "local",
+                },
                 {
                     "choice": "connect-legacy",
                     "repository": f"{owner}/{repo}",
@@ -554,11 +566,11 @@ def github_first_plan(
                     "layout": "legacy-compatible",
                 },
                 {
-                    "choice": "create-current",
+                    "choice": "create-empty-current",
                     "repository": f"{account['login']}/{DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME}",
                     "target": str(modern_target.resolve()),
-                    "layout": "current",
-                    "recommended": True,
+                    "layout": "current-empty",
+                    "existing_content_copied": False,
                 },
             ],
             "repository_visibility": visibility,
@@ -601,7 +613,7 @@ def github_first_plan(
         if confirmations
         else "blocked" if local["status"] == "blocked" else "ready",
         "flow": "agent-onboarding",
-        "runtime": detect_agent_runtime(runtime),
+        "runtime": resolved_runtime,
         "domain_kind": "personal",
         "module_kind": "knowledge",
         "subject_id": f"person:github:{account['login']}",

@@ -364,15 +364,24 @@ class LocalAgentExperienceTests(unittest.TestCase):
         ):
             plan = github_first_plan(runtime="local", client=fake)
         self.assertIsNone(plan["repository"])
-        self.assertEqual("select-legacy-or-current-instance", plan["repository_action"])
-        self.assertIn(
-            "select-legacy-or-current-instance", plan["confirmation_required"]
+        self.assertEqual(
+            "select-legacy-migration-or-current-instance", plan["repository_action"]
         )
-        self.assertEqual("connect-legacy", plan["repository_options"][0]["choice"])
-        self.assertEqual("create-current", plan["repository_options"][1]["choice"])
-        self.assertTrue(plan["repository_options"][1]["recommended"])
+        self.assertIn(
+            "select-migration-legacy-or-empty-current-instance",
+            plan["confirmation_required"],
+        )
+        self.assertEqual("migrate-current", plan["repository_options"][0]["choice"])
+        self.assertTrue(plan["repository_options"][0]["recommended"])
+        self.assertEqual("migration-plan", plan["repository_options"][0]["next_action"])
+        self.assertEqual("local", plan["repository_options"][0]["execution_entry"])
+        self.assertEqual("connect-legacy", plan["repository_options"][1]["choice"])
+        self.assertEqual(
+            "create-empty-current", plan["repository_options"][2]["choice"]
+        )
+        self.assertFalse(plan["repository_options"][2]["existing_content_copied"])
         self.assertTrue(
-            plan["repository_options"][1]["target"].endswith("17deg-personal")
+            plan["repository_options"][0]["target"].endswith("17deg-personal")
         )
 
     class FakeGitHub:

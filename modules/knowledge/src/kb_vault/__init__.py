@@ -6,6 +6,13 @@ from .remote_inbox import GitHubRemoteInbox
 from .curator import KnowledgeCurator
 from .cycle import KnowledgeCycle
 from .retrieval import TrustedRetrieval
+from .migration import (
+    migrate_instance,
+    migration_plan,
+    prepare_migration_source,
+    retirement_plan,
+    retire_source,
+)
 from .capability import KnowledgeCapabilities
 from .model import (
     classification_level_for_tier,
@@ -30,6 +37,11 @@ __all__ = [
     "KnowledgeCycle",
     "KnowledgeCapabilities",
     "TrustedRetrieval",
+    "migration_plan",
+    "migrate_instance",
+    "prepare_migration_source",
+    "retirement_plan",
+    "retire_source",
     "PublicAtlas",
     "classification_level_for_tier",
     "compatibility_tier_for",

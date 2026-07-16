@@ -29,6 +29,13 @@ from kb_vault.agent import (  # noqa: E402
 )
 from kb_vault.adapters.github_contents import GitHubContentsAdapter  # noqa: E402
 from kb_vault.hermes import handle_hermes_request  # noqa: E402
+from kb_vault.migration import (  # noqa: E402
+    migrate_instance,
+    migration_plan,
+    prepare_migration_source,
+    retire_source,
+    retirement_plan,
+)
 
 
 def add_identity_args(parser: argparse.ArgumentParser) -> None:
@@ -163,6 +170,55 @@ def build_parser() -> argparse.ArgumentParser:
     agent_start.add_argument("--confirm-initial-sync", action="store_true")
     agent_start.add_argument("--confirm-production-key-use", action="store_true")
     agent_start.add_argument("--confirm-nonempty-directory", action="store_true")
+
+    migration_source_parser = sub.add_parser(
+        "agent-migration-source", help="prepare a local source for a verified migration"
+    )
+    migration_source_parser.add_argument("--repository", required=True)
+    migration_source_parser.add_argument("--target", type=Path, required=True)
+    migration_source_parser.add_argument(
+        "--confirm-existing-repository", action="store_true"
+    )
+
+    migration_plan_parser = sub.add_parser(
+        "agent-migration-plan", help="plan a verified legacy knowledge migration"
+    )
+    migration_plan_parser.add_argument("--source", type=Path, required=True)
+    migration_plan_parser.add_argument("--target", type=Path, required=True)
+    add_identity_args(migration_plan_parser)
+
+    migration_start_parser = sub.add_parser(
+        "agent-migration-start", help="migrate legacy knowledge into the current layout"
+    )
+    migration_start_parser.add_argument("--source", type=Path, required=True)
+    migration_start_parser.add_argument("--target", type=Path, required=True)
+    add_identity_args(migration_start_parser)
+    migration_start_parser.add_argument("--confirm-content-migration", action="store_true")
+    migration_start_parser.add_argument(
+        "--confirm-local-credential-transfer", action="store_true"
+    )
+
+    retirement_plan_parser = sub.add_parser(
+        "agent-retirement-plan", help="plan the disposition of a verified migration source"
+    )
+    retirement_plan_parser.add_argument("--source", type=Path, required=True)
+    retirement_plan_parser.add_argument("--target", type=Path, required=True)
+
+    retirement_start_parser = sub.add_parser(
+        "agent-retirement-start", help="preserve, archive, or delete a migrated source"
+    )
+    retirement_start_parser.add_argument("--source", type=Path, required=True)
+    retirement_start_parser.add_argument("--target", type=Path, required=True)
+    retirement_start_parser.add_argument(
+        "--action", choices=("preserve", "archive", "delete"), required=True
+    )
+    retirement_start_parser.add_argument("--delete-local", action="store_true")
+    retirement_start_parser.add_argument("--delete-remote", action="store_true")
+    retirement_start_parser.add_argument("--expected-source-root", default="")
+    retirement_start_parser.add_argument("--expected-repository", default="")
+    retirement_start_parser.add_argument("--confirm-archive", action="store_true")
+    retirement_start_parser.add_argument("--confirm-delete-local", action="store_true")
+    retirement_start_parser.add_argument("--confirm-delete-remote", action="store_true")
 
     local_agent_plan = sub.add_parser(
         "agent-local-plan", help="prepare a safe local Agent setup plan"
@@ -797,6 +853,38 @@ def execute(args: argparse.Namespace) -> object:
             confirm_initial_sync=args.confirm_initial_sync,
             confirm_production_key_use=args.confirm_production_key_use,
             confirm_nonempty_directory=args.confirm_nonempty_directory,
+        )
+    if args.command == "agent-migration-plan":
+        return migration_plan(args.source, args.target, identities=identities(args))
+    if args.command == "agent-migration-source":
+        return prepare_migration_source(
+            args.repository,
+            args.target,
+            confirm_existing_repository=args.confirm_existing_repository,
+        )
+    if args.command == "agent-migration-start":
+        return migrate_instance(
+            args.source,
+            args.target,
+            age_path=args.age_path,
+            confirm_content_migration=args.confirm_content_migration,
+            confirm_local_credential_transfer=args.confirm_local_credential_transfer,
+            identities=identities(args),
+        )
+    if args.command == "agent-retirement-plan":
+        return retirement_plan(args.source, args.target)
+    if args.command == "agent-retirement-start":
+        return retire_source(
+            args.source,
+            args.target,
+            action=args.action,
+            delete_local=args.delete_local,
+            delete_remote=args.delete_remote,
+            expected_source_root=args.expected_source_root,
+            expected_repository=args.expected_repository,
+            confirm_archive=args.confirm_archive,
+            confirm_delete_local=args.confirm_delete_local,
+            confirm_delete_remote=args.confirm_delete_remote,
         )
     if args.command == "agent-local-plan":
         return local_plan(args.target, mode=args.mode, age_path=args.age_path)
