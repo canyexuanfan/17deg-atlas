@@ -42,12 +42,36 @@ def _windows_age_candidates() -> list[Path]:
     return candidates
 
 
+def _managed_binary_candidates(
+    name: str,
+    *,
+    suffix: str,
+    local_root: str | Path | None = None,
+    workspace: str | Path | None = None,
+) -> list[Path]:
+    candidates: list[Path] = []
+    if workspace:
+        candidates.append(Path(workspace) / ".17deg-atlas" / "bin" / f"{name}{suffix}")
+    if local_root:
+        root = Path(local_root).expanduser().resolve()
+        for candidate in (root, *list(root.parents)[:6]):
+            candidates.extend(
+                [
+                    candidate / ".local" / "bin" / f"{name}{suffix}",
+                    candidate / ".17deg-atlas" / "bin" / f"{name}{suffix}",
+                ]
+            )
+    return candidates
+
+
 def discover_age_executable(
     age_path: str | Path | None = None,
     *,
     common_paths: Mapping[str, list[Path]] | None = None,
     system: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
+    local_root: str | Path | None = None,
+    workspace: str | Path | None = None,
 ) -> Path | None:
     active_system = (system or platform.system()).lower()
     suffix = ".exe" if active_system == "windows" else ""
@@ -55,8 +79,15 @@ def discover_age_executable(
     configured = age_path or os.environ.get("KB_AGE_PATH")
     if configured:
         candidates.append(Path(configured))
-    if workspace := atlas_workspace():
-        candidates.append(workspace / ".17deg-atlas" / "bin" / f"age{suffix}")
+    selected_workspace = workspace or atlas_workspace()
+    candidates.extend(
+        _managed_binary_candidates(
+            "age",
+            suffix=suffix,
+            local_root=local_root,
+            workspace=selected_workspace,
+        )
+    )
     candidates.extend((common_paths or {}).get("age", []))
     if discovered := which("age"):
         candidates.append(Path(discovered))
@@ -72,26 +103,71 @@ def discover_age_executable(
     return None
 
 
-def dependency_status(age_path: str | Path | None = None) -> dict[str, Any]:
-    age = discover_age_executable(age_path)
-    suffix = ".exe" if os.name == "nt" else ""
-    configured_keygen = os.environ.get("KB_AGE_KEYGEN_PATH", "").strip()
-    keygen = (
-        Path(configured_keygen).expanduser().resolve()
-        if configured_keygen
-        else age.with_name(f"age-keygen{suffix}") if age else None
-    )
-    try:
-        age_keygen_available = bool(
-            (keygen and keygen.is_file()) or shutil.which("age-keygen")
+def discover_age_keygen_executable(
+    age_path: str | Path | None = None,
+    keygen_path: str | Path | None = None,
+    *,
+    common_paths: Mapping[str, list[Path]] | None = None,
+    system: str | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    local_root: str | Path | None = None,
+    workspace: str | Path | None = None,
+) -> Path | None:
+    active_system = (system or platform.system()).lower()
+    suffix = ".exe" if active_system == "windows" else ""
+    candidates: list[Path] = []
+    configured = keygen_path or os.environ.get("KB_AGE_KEYGEN_PATH")
+    if configured:
+        candidates.append(Path(configured))
+    if age_path:
+        candidates.append(Path(age_path).with_name(f"age-keygen{suffix}"))
+    selected_workspace = workspace or atlas_workspace()
+    candidates.extend(
+        _managed_binary_candidates(
+            "age-keygen",
+            suffix=suffix,
+            local_root=local_root,
+            workspace=selected_workspace,
         )
-    except OSError:
-        age_keygen_available = bool(shutil.which("age-keygen"))
+    )
+    candidates.extend((common_paths or {}).get("age-keygen", []))
+    if discovered := which("age-keygen"):
+        candidates.append(Path(discovered))
+    if active_system == "windows":
+        candidates.extend(
+            candidate.with_name("age-keygen.exe") for candidate in _windows_age_candidates()
+        )
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+            if resolved.is_file():
+                return resolved
+        except OSError:
+            continue
+    return None
+
+
+def dependency_status(
+    age_path: str | Path | None = None,
+    *,
+    local_root: str | Path | None = None,
+    workspace: str | Path | None = None,
+) -> dict[str, Any]:
+    age = discover_age_executable(
+        age_path,
+        local_root=local_root,
+        workspace=workspace,
+    )
+    keygen = discover_age_keygen_executable(
+        age,
+        local_root=local_root,
+        workspace=workspace,
+    )
     values = {
         "python": True,
         "git": bool(shutil.which("git")),
         "age": bool(age),
-        "age_keygen": age_keygen_available,
+        "age_keygen": bool(keygen),
     }
     return {
         "available": values,
@@ -128,6 +204,14 @@ class LocalDependencyEnvironment:
 
     def discover_age(self, age_path: str | Path | None = None) -> Path | None:
         return discover_age_executable(
+            age_path,
+            common_paths=self.common_paths,
+            system=self.system,
+            which=self.which,
+        )
+
+    def discover_age_keygen(self, age_path: str | Path | None = None) -> Path | None:
+        return discover_age_keygen_executable(
             age_path,
             common_paths=self.common_paths,
             system=self.system,

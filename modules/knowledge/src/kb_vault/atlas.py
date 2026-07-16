@@ -105,7 +105,7 @@ class ContentProjection:
     @staticmethod
     def _index_md(records: list[Mapping[str, Any]]) -> bytes:
         lines = [
-            "# 个人域知识公开目录",
+            "# 知识目录",
             "",
             "内容会按主题持续整理，已开放条目出现时从此处进入。",
             "",

@@ -24,6 +24,7 @@ from .dependencies import (
     LocalDependencyEnvironment,
     dependency_status,
     discover_age_executable,
+    discover_age_keygen_executable,
 )
 from .github_onboarding import (
     DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME,
@@ -169,7 +170,10 @@ def local_plan(
         confirmations.extend(
             ["production-key-location", "production-key-backup", "production-key-use"]
         )
-    dependencies = dependency_status(age_path)
+    dependencies = dependency_status(
+        age_path,
+        local_root=workspace["root"],
+    )
     automatic_steps = ["check-runtime"]
     if workspace["is_instance"]:
         automatic_steps.extend(["connect-existing-instance", "verify-lock-and-recovery"])
@@ -273,6 +277,7 @@ def github_first_plan(
     client: GitHubRepositoryClient | None = None,
     cli_environment: GitHubCLIEnvironment | None = None,
     dependency_environment: LocalDependencyEnvironment | None = None,
+    run_initial_sync: bool = True,
 ) -> dict[str, Any]:
     if visibility not in ("private", "public"):
         raise KBError("GitHub visibility must be private or public")
@@ -397,6 +402,9 @@ def github_first_plan(
                 repository_confirmations = []
     confirmations = [*dependency_confirmations, *local["confirmation_required"]]
     confirmations.extend(repository_confirmations)
+    if run_initial_sync:
+        confirmations.append("initial-github-sync")
+    confirmations = list(dict.fromkeys(confirmations))
     return {
         "status": "needs-confirmation"
         if confirmations
@@ -470,6 +478,7 @@ def github_first_setup(
         age_path=resolved_dependency_age,
         client=active,
         dependency_environment=dependencies,
+        run_initial_sync=run_initial_sync,
     )
     if plan["repository"] is None:
         raise KBError("choose one discovered knowledge repository before setup")
@@ -547,6 +556,15 @@ def github_first_setup(
         if created:
             raise KBError("GitHub repository was created, but workspace setup did not finish") from exc
         raise
+    validation = {
+        "local_integrity": bool(local["verification"]["ok"]),
+        "synthetic_recovery": bool(
+            run_self_test and local["self_test"].get("recovery_verified")
+        ),
+        "repository_binding": bool(git_remote_bound),
+        "initial_sync": bool(run_initial_sync and sync.get("pushed")),
+    }
+    onboarding_complete = all(validation.values())
     return {
         "status": "ok",
         "flow": "agent-onboarding",
@@ -566,6 +584,9 @@ def github_first_setup(
         "instance_registered": instance_registered,
         "initial_sync": sync,
         "verified": local["verification"]["ok"],
+        "validation": validation,
+        "onboarding_complete": onboarding_complete,
+        "terminal_state": "complete" if onboarding_complete else "partial",
         "next_prompts": local["next_prompts"],
     }
 
@@ -597,15 +618,7 @@ def _preflight(age_path: str | Path | None, *, require_git: bool) -> Path:
     resolved_age = discover_age_executable(age_path)
     if not resolved_age:
         raise KBError("age is required before local Agent setup")
-    suffix = ".exe" if os.name == "nt" else ""
-    configured_keygen = os.environ.get("KB_AGE_KEYGEN_PATH", "")
-    sibling_keygen = resolved_age.with_name(f"age-keygen{suffix}")
-    discovered_keygen = Path(configured_keygen).expanduser().resolve() if configured_keygen else None
-    if not (
-        (discovered_keygen and discovered_keygen.is_file())
-        or sibling_keygen.is_file()
-        or shutil.which("age-keygen")
-    ):
+    if not discover_age_keygen_executable(resolved_age):
         raise KBError("age-keygen is required before local Agent setup")
     if require_git and not shutil.which("git"):
         raise KBError("git is required before local Agent setup")

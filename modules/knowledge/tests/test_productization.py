@@ -306,6 +306,8 @@ class ProductizationAcceptanceTests(unittest.TestCase):
         self.assertIn("在当前设备为我创建或连接知识库", root_readme)
         self.assertIn("需要 GitHub 操作时先向我确认", root_readme)
         self.assertIn("不要自行改成纯本地流程", root_readme)
+        self.assertIn("默认把入口 Skill 安装在当前项目内", root_readme)
+        self.assertIn("完成后直接向我报告", root_readme)
         self.assertIn("把当前远端 Agent 连接到我的知识库", root_readme)
         self.assertIn("Skill 会自动准备项目所需工具", root_readme)
         self.assertIn("普通用户无需安装 CLI 或手工输入命令", root_readme)
@@ -342,6 +344,12 @@ class ProductizationAcceptanceTests(unittest.TestCase):
         self.assertIn("knowledge lock", local_skill)
         self.assertIn("不得因为 GitHub 操作需要确认而静默改用", local_skill)
         self.assertIn("只有用户明确要求", local_skill)
+        self.assertIn("onboarding_complete: true", local_skill)
+        self.assertIn("terminal_state: complete", local_skill)
+        self.assertIn("不得自行追加 `doctor`", local_skill)
+        self.assertIn("不安装到全局 Skill 目录", local_skill)
+        self.assertIn("onboarding_complete: true", remote_skill)
+        self.assertIn("terminal_state: complete", remote_skill)
 
 
 if __name__ == "__main__":

@@ -114,8 +114,20 @@ def _git_environment(git_path: str) -> dict[str, str]:
 def resolve_github_token(explicit: str | None = None) -> tuple[str, str]:
     if explicit:
         return explicit, "explicit-secret"
-    if configured := os.environ.get("KB_GITHUB_TOKEN", "").strip():
-        return configured, "runtime-secret"
+    for name in ("KB_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        if configured := os.environ.get(name, "").strip():
+            return configured, "runtime-secret"
+    if gh_path := shutil.which("gh"):
+        result = subprocess.run(
+            [gh_path, "auth", "token", "--hostname", "github.com"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            token = result.stdout.decode("utf-8", errors="replace").strip()
+            if token:
+                return token, "github-cli"
     git_path = shutil.which("git")
     if not git_path:
         raise KBError("GitHub connection requires Git or a runtime Secret")
@@ -911,7 +923,7 @@ def initial_git_sync(
     if staged.returncode not in (0, 1):
         raise KBError("knowledge workspace change check failed")
     if committed:
-        commit = run(["commit", "-m", "初始化个人域知识模块"])
+        commit = run(["commit", "-m", "初始化知识工作区"])
         if commit.returncode != 0:
             raise KBError("knowledge workspace initial commit failed")
     pushed = run(["push", "--set-upstream", "origin", f"HEAD:{branch}"])

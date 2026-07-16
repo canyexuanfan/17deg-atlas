@@ -121,6 +121,19 @@ class KnowledgeVault:
             raise KBError(f"invalid or missing configuration: {relative}") from exc
 
     def _find_binary(self, name: str, explicit: str | Path | None) -> Path | None:
+        if name in ("age", "age-keygen"):
+            from .dependencies import (
+                discover_age_executable,
+                discover_age_keygen_executable,
+            )
+
+            if name == "age":
+                return discover_age_executable(explicit, local_root=self.root)
+            return discover_age_keygen_executable(
+                getattr(self, "age_path", None),
+                explicit,
+                local_root=self.root,
+            )
         if explicit is not None:
             path = Path(explicit).resolve()
             return path if path.is_file() else None

@@ -9,11 +9,15 @@ description: 远端入口 Skill，用于远端 Agent 连接个人知识库并执
 
 ## 首次连接
 
+优先安装在当前项目；平台只支持固定 Skill 目录时使用平台标准目录，不额外创建其他副本。
+
 1. 必要时运行 `scripts/bootstrap.py`。
 2. 通过 `scripts/atlas.py workspace plan` 生成计划。
-3. 汇总真实远端动作并完成必要确认。
+3. 将同一计划中需要用户决定的真实动作汇总为一份确认清单；平台要求逐项确认时遵循平台要求。
 4. 通过 `scripts/atlas.py workspace start` 执行相同计划。
-5. 验证完成后再报告成功。
+5. 当结果同时包含 `onboarding_complete: true` 和 `terminal_state: complete` 时，向用户报告成功并停止。
+
+完成后不得自行追加再次连接、额外安装或其他验收动作。
 
 ## 自然语言路由
 

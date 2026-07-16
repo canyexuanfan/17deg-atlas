@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,7 @@ class CLIPackagingAcceptanceTests(unittest.TestCase):
             installed = json.loads(bootstrap.stdout)
             self.assertEqual("0.1.0", installed["cli_version"])
             launcher = Path(installed["cli_path"])
+            self.assertEqual("17deg-atlas-local.py", launcher.name)
             self.assertTrue(launcher.is_file())
             self.assertTrue((workspace / ".17deg-atlas" / "state" / "runtime.json").is_file())
             runtime = json.loads(
@@ -74,11 +76,31 @@ class CLIPackagingAcceptanceTests(unittest.TestCase):
                 )
             )
             self.assertEqual(2, runtime["schema_version"])
+            self.assertEqual("local", runtime["entry_runtime"])
+            self.assertEqual(str(launcher), runtime["launcher"])
             self.assertEqual(64, len(runtime["source_fingerprint"]))
             self.assertIn("source_commit", runtime)
             version = self.run_python(launcher, "--version", cwd=workspace)
             self.assertEqual(0, version.returncode, version.stderr)
             self.assertEqual("17deg-atlas 0.1.0", version.stdout.strip())
+
+            nested = workspace / "notes" / "drafts"
+            nested.mkdir(parents=True)
+            environment = os.environ.copy()
+            environment.pop("ATLAS_ENTRY_RUNTIME", None)
+            environment.pop("ATLAS_WORKSPACE", None)
+            role_plan = subprocess.run(
+                [sys.executable, str(launcher), "workspace", "plan"],
+                cwd=nested,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(0, role_plan.returncode, role_plan.stderr)
+            self.assertEqual("local", json.loads(role_plan.stdout)["runtime"])
 
             instance = workspace / "17deg-personal"
             initialized = self.run_python(

@@ -20,6 +20,7 @@ REMOTE_PATH = MODULE_ROOT / "skills" / "github-api-file-pusher" / "scripts" / "r
 sys.path.insert(0, str(MODULE_ROOT / "src"))
 
 from kb_vault import KBError, KnowledgeVault  # noqa: E402
+from kb_vault.adapters.github_contents import GitHubContentsAdapter  # noqa: E402
 from kb_vault.bootstrap import (  # noqa: E402
     KNOWLEDGE_MODULE_RELATIVE,
     initialize_instance,
@@ -40,6 +41,7 @@ from kb_vault.github_onboarding import (  # noqa: E402
     GitHubCLIRepositoryClient,
     GitHubRepositoryClient,
     initial_git_sync,
+    resolve_github_token,
 )
 
 
@@ -358,7 +360,6 @@ class LocalAgentExperienceTests(unittest.TestCase):
             runtime="remote",
             client=fake,
             age_path=self.age,
-            run_self_test=False,
             confirm_repository_create=True,
             confirm_initial_sync=True,
             syncer=lambda root, **kwargs: {"committed": True, "pushed": True},
@@ -389,9 +390,12 @@ class LocalAgentExperienceTests(unittest.TestCase):
             origin.stdout.strip(),
         )
         self.assertTrue(result["git_remote_bound"])
+        self.assertTrue(result["onboarding_complete"])
+        self.assertEqual("complete", result["terminal_state"])
+        self.assertTrue(all(result["validation"].values()))
         remembered = github_first_plan(root, runtime="remote", client=fake)
         self.assertEqual("connect-remembered-repository", remembered["repository_action"])
-        self.assertEqual([], remembered["confirmation_required"])
+        self.assertEqual(["initial-github-sync"], remembered["confirmation_required"])
 
     def test_github_first_setup_preflights_before_remote_creation(self) -> None:
         fake = self.FakeGitHub()
@@ -456,7 +460,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
         plan = github_first_plan(root, runtime="remote", client=fake)
         self.assertEqual("connect-discovered-repository", plan["repository_action"])
         self.assertEqual("example-user/my-existing-vault", plan["repository"])
-        self.assertEqual([], plan["confirmation_required"])
+        self.assertEqual(["initial-github-sync"], plan["confirmation_required"])
         result = github_first_setup(
             root,
             runtime="remote",
@@ -686,6 +690,44 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertTrue(any(command[1:3] == ["auth", "login"] for command in commands))
         self.assertTrue(any(command[1:3] == ["auth", "setup-git"] for command in commands))
 
+    def test_contents_adapter_accepts_github_multiline_base64(self) -> None:
+        encoded = base64.b64encode("知识内容".encode("utf-8")).decode("ascii")
+        multiline = "\n".join(encoded[index : index + 5] for index in range(0, len(encoded), 5))
+
+        def transport(method, url, headers, body):
+            del method, url, headers, body
+            return 200, {"content": multiline, "sha": "content-sha"}
+
+        adapter = GitHubContentsAdapter(
+            owner="example-user",
+            repo="example-vault",
+            token="test-token",
+            transport=transport,
+        )
+        result = adapter.get_file(path="knowledge/example.md")
+        self.assertEqual("知识内容".encode("utf-8"), result["content"])
+        self.assertEqual("content-sha", result["sha"])
+
+    def test_contents_adapter_reuses_authenticated_github_cli_token(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["gh", "auth", "token", "--hostname", "github.com"],
+            0,
+            stdout=b"github-cli-secret\n",
+            stderr=b"",
+        )
+        cleared = {"KB_GITHUB_TOKEN": "", "GH_TOKEN": "", "GITHUB_TOKEN": ""}
+        with mock.patch.dict(os.environ, cleared, clear=False), mock.patch(
+            "kb_vault.github_onboarding.shutil.which",
+            side_effect=lambda name: "gh" if name == "gh" else None,
+        ), mock.patch(
+            "kb_vault.github_onboarding.subprocess.run",
+            return_value=completed,
+        ) as runner:
+            token, source = resolve_github_token()
+        self.assertEqual("github-cli-secret", token)
+        self.assertEqual("github-cli", source)
+        runner.assert_called_once()
+
     def test_windows_package_manager_can_be_found_outside_path(self) -> None:
         winget = self.base / "WindowsApps" / "winget.exe"
         winget.parent.mkdir()
@@ -763,6 +805,35 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertFalse(installation["required"])
         self.assertEqual("existing", installation["manager"])
         self.assertEqual(age.resolve(), environment.install_age())
+
+    def test_vault_doctor_reuses_winget_age_without_local_copies(self) -> None:
+        root = self.base / "doctor-vault"
+        initialize_instance(root)
+        local_app_data = self.base / "LocalAppData"
+        package = (
+            local_app_data
+            / "Microsoft"
+            / "WinGet"
+            / "Packages"
+            / "FiloSottile.age_test"
+            / "age"
+        )
+        package.mkdir(parents=True)
+        age = package / "age.exe"
+        keygen = package / "age-keygen.exe"
+        age.write_bytes(b"age")
+        keygen.write_bytes(b"age-keygen")
+        environment = {
+            "LOCALAPPDATA": str(local_app_data),
+            "KB_AGE_PATH": "",
+            "KB_AGE_KEYGEN_PATH": "",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch(
+            "kb_vault.dependencies.platform.system", return_value="Windows"
+        ):
+            doctor = KnowledgeVault(root).doctor()
+        self.assertEqual(str(age.resolve()), doctor["age"])
+        self.assertEqual(str(keygen.resolve()), doctor["age_keygen"])
 
     def test_github_cli_discovers_instances_with_one_graphql_request(self) -> None:
         commands = []

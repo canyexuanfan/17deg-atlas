@@ -358,7 +358,7 @@ class SemanticGovernanceAcceptanceTests(unittest.TestCase):
             run_object_id=run["run_object_id"],
             outcome="outdated",
             notes="The scope and answer should be recompiled.",
-            scope_add=["适用于个人域候选知识"],
+            scope_add=["适用于候选知识"],
             trigger_recompile=True,
             human_confirmed=True,
             identities=self.identities,
@@ -366,7 +366,7 @@ class SemanticGovernanceAcceptanceTests(unittest.TestCase):
         queue = self.semantic_jsonl("recompile-queue.jsonl")
         self.assertEqual(1, len(queue))
         applicability = self.semantic_jsonl("applicability.jsonl")
-        self.assertIn("适用于个人域候选知识", applicability[0]["scope"])
+        self.assertIn("适用于候选知识", applicability[0]["scope"])
 
         recompiled = self.cycle.recompile(
             request_id="feedback-recompile",

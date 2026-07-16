@@ -158,7 +158,8 @@ class GitHubContentsAdapter:
         if status != 200:
             raise KBError(f"GitHub Contents API read failed with status {status}")
         try:
-            content = base64.b64decode(payload["content"], validate=True)
+            encoded = "".join(str(payload["content"]).split())
+            content = base64.b64decode(encoded, validate=True)
         except (KeyError, ValueError) as exc:
             raise KBError("GitHub response content is invalid") from exc
         return {"status": "ok", "path": path, "sha": payload.get("sha"), "content": content}

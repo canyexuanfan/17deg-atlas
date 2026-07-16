@@ -20,9 +20,21 @@ REMOTE_SKILL_ROOT = REPOSITORY_ROOT / "skills" / "17deg-atlas-remote"
 
 class SkillContractTests(unittest.TestCase):
     def test_entry_skills_share_one_bootstrap_seed(self) -> None:
-        local_bootstrap = (LOCAL_SKILL_ROOT / "scripts" / "bootstrap.py").read_bytes()
-        remote_bootstrap = (REMOTE_SKILL_ROOT / "scripts" / "bootstrap.py").read_bytes()
-        self.assertEqual(local_bootstrap, remote_bootstrap)
+        local_bootstrap = (LOCAL_SKILL_ROOT / "scripts" / "bootstrap.py").read_text(
+            encoding="utf-8"
+        )
+        remote_bootstrap = (REMOTE_SKILL_ROOT / "scripts" / "bootstrap.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('ENTRY_RUNTIME = "local"', local_bootstrap)
+        self.assertIn('ENTRY_RUNTIME = "remote"', remote_bootstrap)
+        normalized_local = local_bootstrap.replace(
+            'ENTRY_RUNTIME = "local"', 'ENTRY_RUNTIME = "<role>"'
+        )
+        normalized_remote = remote_bootstrap.replace(
+            'ENTRY_RUNTIME = "remote"', 'ENTRY_RUNTIME = "<role>"'
+        )
+        self.assertEqual(normalized_local, normalized_remote)
 
     def test_local_and_remote_entry_skills_are_explicit_and_wrappers_run(self) -> None:
         for runtime, root in (("local", LOCAL_SKILL_ROOT), ("remote", REMOTE_SKILL_ROOT)):
@@ -156,7 +168,7 @@ class SkillContractTests(unittest.TestCase):
                     "--path",
                     "README.md",
                     "--message",
-                    "测试：确认门",
+                    "测试：操作确认",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

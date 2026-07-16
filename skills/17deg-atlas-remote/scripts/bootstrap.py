@@ -19,6 +19,7 @@ MODULE_RELATIVES = (
     Path("domains") / "personal" / "knowledge",
 )
 CLI_VERSION = "0.1.0"
+ENTRY_RUNTIME = "remote"
 
 
 class BootstrapError(RuntimeError):
@@ -185,8 +186,34 @@ raise SystemExit(main())
     )
     if os.name != "nt":
         shell.chmod(0o755)
+    role_launcher = bin_root / f"17deg-atlas-{ENTRY_RUNTIME}.py"
+    role_launcher.write_text(
+        f'''#!/usr/bin/env python3
+import os
+import runpy
+from pathlib import Path
+
+workspace = Path(__file__).resolve().parents[2]
+os.environ["ATLAS_WORKSPACE"] = str(workspace)
+os.environ["ATLAS_ENTRY_RUNTIME"] = "{ENTRY_RUNTIME}"
+runpy.run_path(str(Path(__file__).with_name("17deg-atlas.py")), run_name="__main__")
+''',
+        encoding="utf-8",
+    )
+    role_command = bin_root / f"17deg-atlas-{ENTRY_RUNTIME}.cmd"
+    role_command.write_text(
+        f'@"{sys.executable}" "%~dp0\\17deg-atlas-{ENTRY_RUNTIME}.py" %*\r\n',
+        encoding="utf-8",
+    )
+    role_shell = bin_root / f"17deg-atlas-{ENTRY_RUNTIME}"
+    role_shell.write_text(
+        f'#!/usr/bin/env sh\nexec "{sys.executable}" "$(dirname "$0")/17deg-atlas-{ENTRY_RUNTIME}.py" "$@"\n',
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        role_shell.chmod(0o755)
     check = subprocess.run(
-        [sys.executable, str(launcher), "--version"],
+        [sys.executable, str(role_launcher), "--version"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -200,7 +227,9 @@ raise SystemExit(main())
         "cli_version": CLI_VERSION,
         "tool_root": str(tool_root),
         "python": sys.executable,
-        "launcher": str(launcher),
+        "launcher": str(role_launcher),
+        "generic_launcher": str(launcher),
+        "entry_runtime": ENTRY_RUNTIME,
         "installed_at": datetime.now(timezone.utc).isoformat(),
         **(metadata or {}),
     }
@@ -209,8 +238,9 @@ raise SystemExit(main())
         encoding="utf-8",
     )
     return {
-        "cli_path": str(launcher),
-        "cli_command": str(command if os.name == "nt" else shell),
+        "cli_path": str(role_launcher),
+        "cli_command": str(role_command if os.name == "nt" else role_shell),
+        "generic_cli_path": str(launcher),
         "cli_version": CLI_VERSION,
     }
 
