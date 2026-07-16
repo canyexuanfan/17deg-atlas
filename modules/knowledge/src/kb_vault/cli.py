@@ -17,6 +17,7 @@ from kb_vault import (  # noqa: E402
     KnowledgeCapabilities,
     KnowledgeVault,
     TrustedRetrieval,
+    compatibility_tier_for,
 )
 from kb_vault.bootstrap import initialize_personal_domain, resolve_knowledge_root  # noqa: E402
 from kb_vault.agent import (  # noqa: E402
@@ -33,9 +34,11 @@ from kb_vault.migration import (  # noqa: E402
     migrate_instance,
     migration_plan,
     prepare_migration_source,
+    record_migration_candidate,
     retire_source,
     retirement_plan,
 )
+from kb_vault.workspace_views import audit_workspace_views, build_workspace_views  # noqa: E402
 
 
 def add_identity_args(parser: argparse.ArgumentParser) -> None:
@@ -59,9 +62,23 @@ def add_authorship_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--contributor", action="append", default=[])
     parser.add_argument("--source-ref", action="append", default=[])
+    parser.add_argument("--interaction-ref", action="append", default=[])
     parser.add_argument(
         "--intended-role",
-        choices=("evidence", "knowledge", "creation", "cognition", "work", "publication", "unknown"),
+        choices=(
+            "memory",
+            "evidence",
+            "knowledge",
+            "creation",
+            "cognition",
+            "capability",
+            "work",
+            "product",
+            "relationship",
+            "governance",
+            "publication",
+            "unknown",
+        ),
     )
     parser.add_argument(
         "--corpus-eligibility", choices=("denied", "candidate", "approved"), default="denied"
@@ -92,6 +109,20 @@ def recipients(args: argparse.Namespace) -> dict[str, str]:
         for tier in ("basic", "advanced", "core")
         if (value := getattr(args, f"recipient_{tier}", None))
     }
+
+
+def write_tier(args: argparse.Namespace) -> str:
+    access = getattr(args, "access", None)
+    lifecycle = getattr(args, "lifecycle", "active")
+    if access:
+        return compatibility_tier_for(
+            classification_level=access,
+            lifecycle=lifecycle,
+        )
+    tier = getattr(args, "tier", None)
+    if not tier:
+        raise KBError("provide --access or legacy --tier")
+    return str(tier)
 
 
 def content_value(args: argparse.Namespace) -> str:
@@ -135,7 +166,7 @@ def add_github_target_args(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="KB v0.1 five-tier local knowledge vault"
+        description="Agent-ready local knowledge workspace"
     )
     default_root = Path(os.environ.get("KB_INSTANCE_ROOT", Path.cwd()))
     parser.add_argument("--root", type=Path, default=default_root)
@@ -198,6 +229,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-local-credential-transfer", action="store_true"
     )
 
+    migration_review_parser = sub.add_parser(
+        "agent-migration-review",
+        help="verify one migrated source against its raw and LLM Wiki objects",
+    )
+    migration_review_parser.add_argument("--target", type=Path, required=True)
+    migration_review_parser.add_argument("--source-path", required=True)
+    migration_review_parser.add_argument("--raw-object-id", required=True)
+    migration_review_parser.add_argument("--wiki-object-id", action="append", default=[])
+    migration_review_parser.add_argument("--confirm-raw-only", action="store_true")
+    add_identity_args(migration_review_parser)
+
     retirement_plan_parser = sub.add_parser(
         "agent-retirement-plan", help="plan the disposition of a verified migration source"
     )
@@ -239,7 +281,18 @@ def build_parser() -> argparse.ArgumentParser:
     natural_save = sub.add_parser(
         "agent-save", help="save knowledge while generating internal identifiers automatically"
     )
-    natural_save.add_argument("--tier", choices=("public", "archive", "basic", "advanced", "core"), required=True)
+    natural_write_scope = natural_save.add_mutually_exclusive_group(required=True)
+    natural_write_scope.add_argument("--access", choices=("public", "basic", "advanced", "core"))
+    natural_write_scope.add_argument(
+        "--tier",
+        choices=("public", "archive", "basic", "advanced", "core"),
+        help="legacy compatibility input",
+    )
+    natural_save.add_argument(
+        "--lifecycle",
+        choices=("active", "superseded", "archived", "revoked"),
+        default="active",
+    )
     natural_save.add_argument("--kind", choices=("raw", "wiki", "release"), default="raw")
     natural_save.add_argument("--title", required=True)
     natural_save.add_argument("--summary", default="")
@@ -267,7 +320,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     add = sub.add_parser("add", help="add a public or encrypted object")
     add.add_argument("--request-id", required=True)
-    add.add_argument("--tier", choices=("public", "archive", "basic", "advanced", "core"), required=True)
+    add_write_scope = add.add_mutually_exclusive_group(required=True)
+    add_write_scope.add_argument("--access", choices=("public", "basic", "advanced", "core"))
+    add_write_scope.add_argument(
+        "--tier",
+        choices=("public", "archive", "basic", "advanced", "core"),
+        help="legacy compatibility input",
+    )
     add.add_argument(
         "--kind",
         choices=("source_profile", "subscription", "capture_event", "raw", "wiki", "release", "run", "feedback"),
@@ -341,6 +400,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--media-type", choices=("article", "screenshot", "site", "data", "book", "transcript", "idea", "conversation", "file"), required=True)
     capture.add_argument("--capture-purpose", choices=("trend", "deep_learning", "case", "demand", "feedback", "reference"), required=True)
     capture.add_argument("--locator", default="")
+    capture.add_argument("--interaction-ref", action="append", default=[])
     capture.add_argument("--tier", choices=("public", "archive", "basic", "advanced", "core"), default="basic")
     capture.add_argument("--rights", choices=("owned", "licensed", "restricted", "unknown"), default="unknown")
     capture.add_argument("--decision", choices=("accept", "reject", "fail"), default="accept")
@@ -725,6 +785,15 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query")
 
     sub.add_parser("list", help="list all currently visible objects")
+    workspace_views = sub.add_parser(
+        "workspace-view-build",
+        help="rebuild the local human-readable raw, library, and Wiki views",
+    )
+    add_identity_args(workspace_views)
+    sub.add_parser(
+        "workspace-view-audit",
+        help="check local workspace properties before applying changes",
+    )
     sub.add_parser("lock", help="remove generated private indexes and decrypted views")
     sub.add_parser("reindex", help="rebuild public indexes")
 
@@ -871,6 +940,16 @@ def execute(args: argparse.Namespace) -> object:
             confirm_local_credential_transfer=args.confirm_local_credential_transfer,
             identities=identities(args),
         )
+    if args.command == "agent-migration-review":
+        return record_migration_candidate(
+            args.target,
+            source_path=args.source_path,
+            raw_object_id=args.raw_object_id,
+            wiki_object_ids=args.wiki_object_id,
+            identities=identities(args),
+            confirm_raw_only=args.confirm_raw_only,
+            age_path=args.age_path,
+        )
     if args.command == "agent-retirement-plan":
         return retirement_plan(args.source, args.target)
     if args.command == "agent-retirement-start":
@@ -901,10 +980,19 @@ def execute(args: argparse.Namespace) -> object:
     if args.command == "init-instance":
         return initialize_personal_domain(args.target)
     vault = KnowledgeVault(resolve_knowledge_root(args.root), age_path=args.age_path)
+    if args.command == "workspace-view-build":
+        return build_workspace_views(
+            vault,
+            args.root,
+            identities=identities(args),
+        )
+    if args.command == "workspace-view-audit":
+        return audit_workspace_views(args.root)
     if args.command == "agent-save":
         return agent_save(
             vault,
-            tier=args.tier,
+            tier=write_tier(args),
+            lifecycle=args.lifecycle,
             kind=args.kind,
             title=args.title,
             summary=args.summary,
@@ -914,6 +1002,7 @@ def execute(args: argparse.Namespace) -> object:
             authorship_status=args.authorship_status,
             contributors=tuple(args.contributor),
             source_refs=tuple(args.source_ref),
+            interaction_refs=tuple(args.interaction_ref),
             intended_role=args.intended_role or "unknown",
             corpus_eligibility=args.corpus_eligibility,
             style_eligibility=args.style_eligibility,
@@ -936,7 +1025,7 @@ def execute(args: argparse.Namespace) -> object:
     if args.command == "add":
         return vault.add(
             request_id=args.request_id,
-            tier=args.tier,
+            tier=write_tier(args),
             kind=args.kind,
             title=args.title,
             summary=args.summary,
@@ -966,6 +1055,7 @@ def execute(args: argparse.Namespace) -> object:
             authorship_status=args.authorship_status,
             contributors=args.contributor,
             source_refs=args.source_ref,
+            interaction_refs=args.interaction_ref,
             intended_role=args.intended_role or "unknown",
             corpus_eligibility=args.corpus_eligibility,
             style_eligibility=args.style_eligibility,
@@ -1005,6 +1095,7 @@ def execute(args: argparse.Namespace) -> object:
             media_type=args.media_type,
             capture_purpose=args.capture_purpose,
             locator=args.locator,
+            interaction_refs=args.interaction_ref,
             tier=args.tier,
             rights=args.rights,
             decision=args.decision,

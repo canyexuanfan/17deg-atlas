@@ -299,6 +299,44 @@ class SemanticPlaneAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual([1, 2, 3, 4], schema["properties"]["schema_version"]["enum"])
         self.assertFalse(schema["additionalProperties"])
+        v4_required = schema["allOf"][-1]["then"]["required"]
+        self.assertNotIn("interaction_refs", v4_required)
+
+    def test_conversation_knowledge_extract_requires_message_level_sources(self) -> None:
+        with self.assertRaises(KBError):
+            self.vault.add(
+                request_id="s-conversation-without-message-ref",
+                tier="basic",
+                kind="raw",
+                title="Unsafe full conversation import",
+                summary="",
+                content="conversation",
+                media_type="conversation",
+                origin_kind="mixed",
+                authorship_status="coauthored",
+                intended_role="evidence",
+                rights="restricted",
+            )
+        receipt = self.vault.add(
+            request_id="s-conversation-extract",
+            tier="basic",
+            kind="raw",
+            title="Selected conversation evidence",
+            summary="",
+            content="minimal extract",
+            media_type="conversation",
+            origin_kind="mixed",
+            authorship_status="coauthored",
+            intended_role="knowledge",
+            rights="restricted",
+            source_refs=["memory:chat_01"],
+            interaction_refs=["chat_01#msg_03", "chat_01#msg_04"],
+        )
+        _path, envelope = self.read(receipt["object_id"])
+        self.assertEqual(
+            ["chat_01#msg_03", "chat_01#msg_04"],
+            envelope["interaction_refs"],
+        )
 
 
 if __name__ == "__main__":

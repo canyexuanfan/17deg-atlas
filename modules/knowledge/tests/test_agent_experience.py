@@ -42,6 +42,7 @@ from kb_vault.github_onboarding import (  # noqa: E402
     GitHubCLIRepositoryClient,
     GitHubRepositoryClient,
     bind_repository,
+    configured_repository,
     initial_git_sync,
     resolve_github_token,
 )
@@ -100,6 +101,87 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertNotIn("object-id", parser.stdout)
         self.assertNotIn("recipient", parser.stdout)
 
+    def test_cli_access_lifecycle_legacy_compatibility_and_view_audit(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        root = self.base / "access-cli"
+        local_setup(
+            root,
+            mode="test",
+            age_path=self.age,
+            initialize_git=False,
+            run_self_test=False,
+        )
+
+        def run_cli(*arguments: str) -> dict[str, object]:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_ROOT / "scripts" / "kb.py"),
+                    "--root",
+                    str(root),
+                    "--age-path",
+                    str(self.age),
+                    *arguments,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            return json.loads(completed.stdout)
+
+        current = run_cli(
+            "add",
+            "--request-id",
+            "access-current",
+            "--access",
+            "basic",
+            "--lifecycle",
+            "archived",
+            "--kind",
+            "raw",
+            "--media-type",
+            "article",
+            "--title",
+            "Archived basic note",
+            "--content",
+            "kept encrypted while archived",
+        )
+        legacy = run_cli(
+            "add",
+            "--request-id",
+            "access-legacy",
+            "--tier",
+            "basic",
+            "--kind",
+            "raw",
+            "--media-type",
+            "file",
+            "--title",
+            "Legacy basic note",
+            "--content",
+            "legacy compatibility remains available",
+        )
+        self.assertEqual("basic", current["details"]["tier"])
+        self.assertEqual("basic", legacy["details"]["tier"])
+
+        knowledge_root = resolve_knowledge_root(root)
+        run_cli(
+            "workspace-view-build",
+            "--identity-basic",
+            str(knowledge_root / ".local" / "test-keys" / "basic.identity"),
+        )
+        audit = run_cli("workspace-view-audit")
+        self.assertEqual("ok", audit["status"])
+        self.assertEqual({}, audit["property_conflicts"])
+        article = next((root / "knowledge" / "raw" / "articles").glob("*.md"))
+        text = article.read_text(encoding="utf-8")
+        self.assertIn('access: "basic"', text)
+        self.assertIn('lifecycle: "archived"', text)
+
     def test_u03_u06_u07_u08_u10_full_local_setup(self) -> None:
         if not self.age:
             self.skipTest("set KB_TEST_AGE or install age")
@@ -107,8 +189,10 @@ class LocalAgentExperienceTests(unittest.TestCase):
         result = local_setup(root, mode="test", age_path=self.age)
         self.assertTrue((root / ".git").is_dir())
         self.assertTrue((root / "AGENTS.md").is_file())
-        knowledge_root = root / KNOWLEDGE_MODULE_RELATIVE
+        knowledge_root = resolve_knowledge_root(root)
         self.assertTrue((knowledge_root / "AGENTS.md").is_file())
+        for name in ("inbox", "raw", "library", "wiki"):
+            self.assertTrue((root / "knowledge" / name).is_dir())
         manifest = json.loads((root / "personal.yaml").read_text(encoding="utf-8"))
         self.assertEqual("personal", manifest["domain_kind"])
         self.assertEqual("domain-root", manifest["layout_kind"])
@@ -427,19 +511,53 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 check=True,
             )
 
-    def test_github_first_plan_needs_no_repository_address(self) -> None:
+    def test_github_first_plan_suggests_but_does_not_choose_repository_name(self) -> None:
         root = self.base / "research notes"
         fake = self.FakeGitHub()
         plan = github_first_plan(root, runtime="local", client=fake)
         self.assertEqual("agent-onboarding", plan["flow"])
         self.assertEqual("local", plan["runtime"])
-        self.assertEqual("example-user/17deg-personal", plan["repository"])
+        self.assertIsNone(plan["repository"])
         self.assertEqual("personal", plan["domain_kind"])
         self.assertEqual("knowledge", plan["module_kind"])
         self.assertEqual("person:github:example-user", plan["subject_id"])
-        self.assertEqual("create-github-repository", plan["repository_action"])
-        self.assertIn("create-github-repository", plan["confirmation_required"])
+        self.assertEqual("choose-repository-name", plan["repository_action"])
+        self.assertEqual("17deg-personal", plan["suggested_repository_name"])
+        self.assertEqual(["repository-name"], plan["required_inputs"])
+        self.assertIn("choose-repository-name", plan["confirmation_required"])
         self.assertNotIn("token", json.dumps(plan).lower())
+
+    def test_selected_repository_name_also_drives_the_default_local_folder(self) -> None:
+        workspace = self.base / "occupied"
+        workspace.mkdir()
+        (workspace / "existing.md").write_text("keep", encoding="utf-8")
+        fake = self.FakeGitHub()
+        with mock.patch("kb_vault.agent.atlas_workspace", return_value=workspace):
+            plan = github_first_plan(
+                runtime="local",
+                repository_name="alice-memory",
+                client=fake,
+            )
+        self.assertEqual(str((workspace / "alice-memory").resolve()), plan["workspace"])
+        self.assertEqual("example-user/alice-memory", plan["repository"])
+
+    def test_domain_repository_binding_stays_in_personal_manifest(self) -> None:
+        root = self.base / "alice-space"
+        initialize_personal_domain(root)
+        bind_repository(
+            root,
+            owner="example-user",
+            repo="alice-space",
+            branch="main",
+            visibility="private",
+        )
+        self.assertFalse((root / "config").exists())
+        manifest = json.loads((root / "personal.yaml").read_text(encoding="utf-8"))
+        self.assertEqual("alice-space", manifest["repository"]["name"])
+        self.assertEqual(
+            {"owner": "example-user", "repo": "alice-space", "branch": "main"},
+            configured_repository(root),
+        )
 
     def test_github_first_existing_repository_requires_connection_confirmation(self) -> None:
         if not self.age:
@@ -503,6 +621,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
         result = github_first_setup(
             root,
             runtime="remote",
+            repository_name="alice-memory",
             client=fake,
             age_path=self.age,
             confirm_repository_create=True,
@@ -515,13 +634,13 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertTrue((root / "knowledge").is_dir())
         self.assertFalse((root / "domains" / "personal" / "knowledge").exists())
         config = json.loads(
-            (root / KNOWLEDGE_MODULE_RELATIVE / "config" / "projection.yml").read_text(encoding="utf-8")
+            (resolve_knowledge_root(root) / "config" / "projection.yml").read_text(encoding="utf-8")
         )
         self.assertEqual("example-user", config["remote_policy"]["allowed_owner"])
-        self.assertEqual("17deg-personal", config["remote_policy"]["allowed_repo"])
-        manifest = json.loads((root / "config" / "instance.json").read_text(encoding="utf-8"))
+        self.assertEqual("alice-memory", config["remote_policy"]["allowed_repo"])
+        manifest = json.loads((root / "personal.yaml").read_text(encoding="utf-8"))
         self.assertEqual("person:github:example-user", manifest["subject_id"])
-        self.assertEqual("17deg-personal", manifest["repository"]["name"])
+        self.assertEqual("alice-memory", manifest["repository"]["name"])
         origin = subprocess.run(
             ["git", "remote", "get-url", "origin"],
             cwd=root,
@@ -533,7 +652,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
         )
         self.assertEqual(0, origin.returncode, origin.stderr)
         self.assertEqual(
-            "https://github.com/example-user/17deg-personal",
+            "https://github.com/example-user/alice-memory",
             origin.stdout.strip(),
         )
         self.assertTrue(result["git_remote_bound"])
@@ -1085,6 +1204,43 @@ class LocalAgentExperienceTests(unittest.TestCase):
             "example-user <example-user@users.noreply.github.com>",
             author.stdout.strip(),
         )
+
+    def test_initial_sync_rejects_questions_and_local_credentials(self) -> None:
+        root = self.base / "unsafe-sync"
+        remote = self.base / "unsafe-sync.git"
+        root.mkdir()
+        subprocess.run(
+            ["git", "init", "--initial-branch=main"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "init", "--bare", str(remote)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(remote)],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        (root / "questions").mkdir()
+        (root / "questions" / "internal.md").write_text("do not upload", encoding="utf-8")
+        with self.assertRaisesRegex(KBError, "scope audit rejected"):
+            initial_git_sync(root, account="example-user")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(0, head.returncode)
 
 
 class RemoteAgentExperienceTests(unittest.TestCase):

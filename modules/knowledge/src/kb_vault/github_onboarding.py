@@ -27,6 +27,7 @@ REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME = "17deg-personal"
 INSTANCE_MANIFEST_PATHS = ("personal.yaml", "config/instance.json")
 INSTANCE_PROBE_PATHS = (
+    ".atlas/runtime/config/tiers.yml",
     "knowledge/config/tiers.yml",
     "domains/personal/knowledge/config/tiers.yml",
     "config/tiers.yml",
@@ -493,6 +494,7 @@ query($login: String!) {
         defaultBranchRef { name }
         personal: object(expression: "HEAD:personal.yaml") { ... on Blob { text } }
         instance: object(expression: "HEAD:config/instance.json") { ... on Blob { text } }
+        runtimeKnowledge: object(expression: "HEAD:.atlas/runtime/config/tiers.yml") { id }
         knowledge: object(expression: "HEAD:knowledge/config/tiers.yml") { id }
         deepKnowledge: object(expression: "HEAD:domains/personal/knowledge/config/tiers.yml") { id }
         legacyKnowledge: object(expression: "HEAD:config/tiers.yml") { id }
@@ -539,7 +541,12 @@ query($login: String!) {
             legacy_subject = f"person:github:{owner}"
             legacy_marker = any(
                 isinstance(node.get(key), Mapping)
-                for key in ("knowledge", "deepKnowledge", "legacyKnowledge")
+                for key in (
+                    "runtimeKnowledge",
+                    "knowledge",
+                    "deepKnowledge",
+                    "legacyKnowledge",
+                )
             )
             if (
                 manifest is None
@@ -766,8 +773,13 @@ def suggested_repository_name(workspace: Path) -> str:
 
 
 def configured_repository(workspace: Path) -> dict[str, str] | None:
-    manifest_path = workspace / "config" / "instance.json"
-    if manifest_path.is_file():
+    manifest_paths = (
+        workspace / "personal.yaml",
+        workspace / "config" / "instance.json",
+    )
+    for manifest_path in manifest_paths:
+        if not manifest_path.is_file():
+            continue
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -779,7 +791,11 @@ def configured_repository(workspace: Path) -> dict[str, str] | None:
             branch = str(repository.get("branch", "main")).strip() or "main"
             if owner and repo:
                 return {"owner": owner, "repo": repo, "branch": branch}
-    path = workspace / "config" / "projection.yml"
+    try:
+        runtime_root = resolve_knowledge_root(workspace)
+    except KBError:
+        runtime_root = workspace
+    path = runtime_root / "config" / "projection.yml"
     if not path.is_file():
         return None
     try:
@@ -823,7 +839,12 @@ def bind_repository(
         "branch": branch,
         "visibility": visibility,
     }
-    manifest_path = workspace / "config" / "instance.json"
+    manifest_path = (
+        workspace / "personal.yaml"
+        if domain_layout
+        else workspace / "config" / "instance.json"
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_temporary = manifest_path.with_suffix(".tmp")
     manifest_temporary.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -934,6 +955,34 @@ def initial_git_sync(
     added = run(["add", "--all"])
     if added.returncode != 0:
         raise KBError("knowledge workspace staging failed")
+    staged_names = run(["diff", "--cached", "--name-only", "-z"])
+    if staged_names.returncode != 0:
+        raise KBError("knowledge workspace scope audit failed")
+    tracked = [value for value in staged_names.stdout.split("\0") if value]
+    forbidden: list[str] = []
+    for value in tracked:
+        normalized = value.replace("\\", "/")
+        parts = tuple(part.casefold() for part in normalized.split("/"))
+        suffix = Path(normalized).suffix.casefold()
+        private_plaintext = (
+            "vault" in parts
+            and any(tier in parts for tier in ("basic", "advanced", "core"))
+            and suffix in (".md", ".txt", ".json")
+        )
+        if (
+            "questions" in parts
+            or ".local" in parts
+            or "migration-source-files" in parts
+            or "migration-history" in parts
+            or suffix in (".identity", ".key", ".pem")
+            or private_plaintext
+        ):
+            forbidden.append(normalized)
+    if forbidden:
+        raise KBError(
+            "initial GitHub sync scope audit rejected local-only files: "
+            + ", ".join(sorted(forbidden)[:10])
+        )
     staged = run(["diff", "--cached", "--quiet"])
     committed = staged.returncode == 1
     if staged.returncode not in (0, 1):

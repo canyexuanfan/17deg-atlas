@@ -14,6 +14,8 @@ from typing import Any, Iterable, Mapping
 
 from .adapters.local import LocalAdapter
 from .model import (
+    CLASSIFICATION_LEVELS,
+    compatibility_tier_for,
     materialize_orthogonal_fields,
     new_orthogonal_fields,
     validate_orthogonal_fields,
@@ -398,6 +400,7 @@ class KnowledgeVault:
                 "authorship_status",
                 "contributors",
                 "source_refs",
+                "interaction_refs",
                 "intended_role",
                 "corpus_eligibility",
                 "style_eligibility",
@@ -609,6 +612,7 @@ class KnowledgeVault:
         authorship_status: str | None = None,
         contributors: Iterable[str] = (),
         source_refs: Iterable[str] = (),
+        interaction_refs: Iterable[str] = (),
         intended_role: str | None = None,
         corpus_eligibility: str = "denied",
         style_eligibility: str = "denied",
@@ -688,6 +692,7 @@ class KnowledgeVault:
             "authorship_status": resolved_authorship,
             "contributors": list(contributors),
             "source_refs": list(source_refs),
+            "interaction_refs": list(interaction_refs),
             "intended_role": resolved_intended_role,
             "corpus_eligibility": corpus_eligibility,
             "style_eligibility": style_eligibility,
@@ -767,6 +772,7 @@ class KnowledgeVault:
                     authorship_status=resolved_authorship,
                     contributors=list(payload["contributors"]),
                     source_refs=list(payload["source_refs"]),
+                    interaction_refs=list(payload["interaction_refs"]),
                     intended_role=resolved_intended_role,
                     corpus_eligibility=corpus_eligibility,
                     style_eligibility=style_eligibility,
@@ -840,6 +846,30 @@ class KnowledgeVault:
             except Exception:
                 pass
             raise
+
+    def add_by_access(
+        self,
+        *,
+        access: str,
+        lifecycle: str = "active",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Write a new object from the human access/lifecycle contract.
+
+        The legacy five-tier path remains an internal compatibility projection.
+        """
+
+        if access not in CLASSIFICATION_LEVELS:
+            raise KBError("access must be public, basic, advanced, or core")
+        if lifecycle not in ("active", "superseded", "archived", "revoked"):
+            raise KBError("lifecycle is invalid")
+        if "tier" in kwargs:
+            raise KBError("provide access or legacy tier, not both")
+        tier = compatibility_tier_for(
+            classification_level=access,
+            lifecycle=lifecycle,
+        )
+        return self.add(tier=tier, lifecycle=lifecycle, **kwargs)
 
     def _read_object_path(
         self, path: Path, identities: Mapping[str, str | Path] | None = None
@@ -1243,7 +1273,23 @@ class KnowledgeVault:
                 removed += sum(1 for item in path.rglob("*") if item.is_file())
                 shutil.rmtree(path)
             path.mkdir(parents=True, exist_ok=True)
-        return {"status": "ok", "removed_files": removed}
+        workspace_views = {
+            "removed_files": 0,
+            "preserved_modified_views": [],
+        }
+        for candidate in self.root.parents:
+            if not (candidate / "personal.yaml").is_file():
+                continue
+            from .workspace_views import clear_workspace_views
+
+            workspace_views = clear_workspace_views(candidate)
+            removed += int(workspace_views["removed_files"])
+            break
+        return {
+            "status": "ok",
+            "removed_files": removed,
+            "workspace_views": workspace_views,
+        }
 
     def _publishable_files(self) -> list[Path]:
         if not (self.root / ".git").exists():

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://17deg.atlas/schemas/personal-domain-instance.schema.json",
+  "title": "Personal Domain Instance",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "instance_id",
+    "domain_kind",
+    "subject_kind",
+    "subject_id",
+    "layout_kind",
+    "repository",
+    "modules"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "instance_id": {"type": "string", "minLength": 1},
+    "domain_kind": {"type": "string", "const": "personal"},
+    "subject_kind": {"type": "string", "const": "person"},
+    "subject_id": {"type": "string"},
+    "layout_kind": {"type": "string", "const": "domain-root"},
+    "repository": {"type": "object", "additionalProperties": true},
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["module_kind", "path", "runtime_path", "module_instance_id"],
+        "additionalProperties": true,
+        "properties": {
+          "module_kind": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "minLength": 1},
+          "runtime_path": {"type": "string", "minLength": 1},
+          "module_instance_id": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

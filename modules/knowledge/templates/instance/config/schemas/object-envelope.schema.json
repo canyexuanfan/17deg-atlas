@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "kb://schemas/object-envelope-v3",
-  "title": "KB object envelope v1/v2/v3 dual-read contract",
+  "title": "KB object envelope v1-v4 dual-read contract",
   "type": "object",
   "required": [
     "schema_version",
@@ -113,7 +113,8 @@
     "authorship_status": {"enum": ["self_authored", "edited", "coauthored", "ai_assisted", "external", "unknown"]},
     "contributors": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
     "source_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "intended_role": {"enum": ["evidence", "knowledge", "creation", "cognition", "work", "publication", "unknown"]},
+    "interaction_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "intended_role": {"enum": ["memory", "evidence", "knowledge", "creation", "cognition", "capability", "work", "product", "relationship", "governance", "publication", "unknown"]},
     "corpus_eligibility": {"enum": ["denied", "candidate", "approved"]},
     "style_eligibility": {"enum": ["denied", "candidate", "approved"]},
     "training_permission": {"enum": ["denied", "undecided", "allowed"]},

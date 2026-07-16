@@ -11,6 +11,13 @@ from .core import KBError, KnowledgeVault
 PERSONAL_DOMAIN_MANIFEST = Path("personal.yaml")
 LEGACY_PERSONAL_DOMAIN_MANIFEST = Path("config") / "instance.json"
 KNOWLEDGE_MODULE_RELATIVE = Path("knowledge")
+PERSONAL_DOMAIN_RUNTIME_RELATIVE = Path(".atlas") / "runtime"
+PERSONAL_KNOWLEDGE_DIRECTORIES = (
+    Path("knowledge") / "inbox",
+    Path("knowledge") / "raw",
+    Path("knowledge") / "library",
+    Path("knowledge") / "wiki",
+)
 LEGACY_KNOWLEDGE_MODULE_RELATIVES = (
     Path("domains") / "personal" / "knowledge",
 )
@@ -62,6 +69,9 @@ def _module_candidates(candidate: Path, manifest: dict[str, Any] | None = None) 
         for item in modules:
             if not isinstance(item, dict) or item.get("module_kind") != "knowledge":
                 continue
+            runtime = str(item.get("runtime_path", "")).strip()
+            if runtime:
+                relatives.insert(0, Path(runtime))
             configured = str(item.get("path", "")).strip()
             if configured:
                 relatives.insert(0, Path(configured))
@@ -168,8 +178,12 @@ def ensure_personal_domain_manifest(
     existing_candidates = _module_candidates(domain_root, located[1] if located else None)
     if len(existing_candidates) > 1:
         raise KBError("multiple knowledge module roots exist; refusing to update the manifest")
-    knowledge_root = existing_candidates[0] if existing_candidates else domain_root / KNOWLEDGE_MODULE_RELATIVE
-    module = ensure_instance_manifest(knowledge_root, subject_id=subject_id)
+    runtime_root = (
+        existing_candidates[0]
+        if existing_candidates
+        else domain_root / PERSONAL_DOMAIN_RUNTIME_RELATIVE
+    )
+    module = ensure_instance_manifest(runtime_root, subject_id=subject_id)
     path = located[0] if located else domain_root / PERSONAL_DOMAIN_MANIFEST
     value = located[1] if located else {
         "schema_version": "1.0",
@@ -202,7 +216,8 @@ def ensure_personal_domain_manifest(
         value["subject_id"] = subject_id
     module_record = {
         "module_kind": "knowledge",
-        "path": knowledge_root.relative_to(domain_root).as_posix(),
+        "path": KNOWLEDGE_MODULE_RELATIVE.as_posix(),
+        "runtime_path": runtime_root.relative_to(domain_root).as_posix(),
         "module_instance_id": module["instance_id"],
     }
     modules = value.get("modules")
@@ -222,6 +237,17 @@ def ensure_personal_domain_manifest(
     )
     temporary.replace(path)
     return value
+
+
+def ensure_personal_knowledge_workspace(root: str | Path) -> list[str]:
+    domain_root = Path(root).expanduser().resolve()
+    created: list[str] = []
+    for relative in PERSONAL_KNOWLEDGE_DIRECTORIES:
+        path = domain_root / relative
+        if not path.is_dir():
+            path.mkdir(parents=True, exist_ok=True)
+            created.append(relative.as_posix())
+    return created
 
 
 def initialize_instance(target: str | Path) -> dict[str, Any]:
@@ -292,10 +318,18 @@ def initialize_personal_domain(target: str | Path) -> dict[str, Any]:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
         created.append(relative.as_posix())
-    knowledge_root = root / KNOWLEDGE_MODULE_RELATIVE
-    module_result = initialize_instance(knowledge_root)
-    for relative in (Path("governance"), Path(".atlas") / "review", Path(".atlas") / "state"):
+    workspace_root = root / KNOWLEDGE_MODULE_RELATIVE
+    runtime_root = root / PERSONAL_DOMAIN_RUNTIME_RELATIVE
+    module_result = initialize_instance(runtime_root)
+    for relative in (
+        Path("governance"),
+        Path(".atlas") / "review",
+        Path(".atlas") / "state",
+        Path(".atlas") / "indexes",
+        Path(".atlas") / "runs",
+    ):
         (root / relative).mkdir(parents=True, exist_ok=True)
+    ensure_personal_knowledge_workspace(root)
     manifest_existed = (root / PERSONAL_DOMAIN_MANIFEST).is_file()
     manifest = ensure_personal_domain_manifest(root)
     manifest_relative = PERSONAL_DOMAIN_MANIFEST.as_posix()
@@ -303,7 +337,9 @@ def initialize_personal_domain(target: str | Path) -> dict[str, Any]:
     return {
         "status": "ok",
         "root": str(root),
-        "knowledge_root": str(knowledge_root),
+        "knowledge_root": str(runtime_root),
+        "knowledge_workspace": str(workspace_root),
+        "runtime_root": str(runtime_root),
         "created_files": sorted(set(created + [
             f"{KNOWLEDGE_MODULE_RELATIVE.as_posix()}/{item}"
             for item in module_result["created_files"]

@@ -10,6 +10,7 @@ from .migration import (
     migrate_instance,
     migration_plan,
     prepare_migration_source,
+    record_migration_candidate,
     retirement_plan,
     retire_source,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "migration_plan",
     "migrate_instance",
     "prepare_migration_source",
+    "record_migration_candidate",
     "retirement_plan",
     "retire_source",
     "PublicAtlas",

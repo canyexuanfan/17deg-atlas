@@ -12,7 +12,9 @@ from typing import Any, Mapping
 from .bootstrap import (
     KNOWLEDGE_MODULE_RELATIVE,
     LEGACY_KNOWLEDGE_MODULE_RELATIVES,
+    PERSONAL_DOMAIN_RUNTIME_RELATIVE,
     ensure_instance_manifest,
+    ensure_personal_knowledge_workspace,
     ensure_personal_domain_manifest,
     initialize_instance,
     initialize_personal_domain,
@@ -77,7 +79,10 @@ def _local_instance_layout(root: str | Path) -> str:
         knowledge_root = resolve_knowledge_root(selected)
     except KBError:
         return "unknown"
-    if knowledge_root == (selected / KNOWLEDGE_MODULE_RELATIVE).resolve():
+    if knowledge_root in (
+        (selected / KNOWLEDGE_MODULE_RELATIVE).resolve(),
+        (selected / PERSONAL_DOMAIN_RUNTIME_RELATIVE).resolve(),
+    ):
         return "current"
     return "legacy-deep"
 
@@ -156,7 +161,9 @@ def discover_local_instances(
     return sorted(discovered.values(), key=lambda item: str(item["root"]).casefold())
 
 
-def resolve_workspace(target: str | Path | None = None) -> Path:
+def resolve_workspace(
+    target: str | Path | None = None, *, default_name: str | None = None
+) -> Path:
     selected = target or os.environ.get("KB_INSTANCE_ROOT")
     if selected:
         return Path(selected).expanduser().resolve()
@@ -171,7 +178,9 @@ def resolve_workspace(target: str | Path | None = None) -> Path:
     meaningful = [
         entry for entry in current.iterdir() if entry.name not in (".git", ".17deg-atlas")
     ]
-    return current if not meaningful else current / DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME
+    return current if not meaningful else current / (
+        default_name or DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME
+    )
 
 
 def detect_agent_runtime(value: str = "auto") -> str:
@@ -197,8 +206,10 @@ def detect_agent_runtime(value: str = "auto") -> str:
     )
 
 
-def workspace_state(target: str | Path | None = None) -> dict[str, Any]:
-    root = resolve_workspace(target)
+def workspace_state(
+    target: str | Path | None = None, *, default_name: str | None = None
+) -> dict[str, Any]:
+    root = resolve_workspace(target, default_name=default_name)
     layout_kind = "none"
     if not root.exists():
         state = "new-path"
@@ -233,10 +244,11 @@ def local_plan(
     *,
     mode: str = "test",
     age_path: str | Path | None = None,
+    default_name: str | None = None,
 ) -> dict[str, Any]:
     if mode not in ("test", "production"):
         raise KBError("local Agent mode must be test or production")
-    workspace = workspace_state(target)
+    workspace = workspace_state(target, default_name=default_name)
     action = {
         "existing-instance": "connect-existing",
         "new-path": "create-new",
@@ -378,13 +390,17 @@ def github_first_plan(
         raise KBError("GitHub visibility must be private or public")
     automatic_local_selection = target is None and not os.environ.get("KB_INSTANCE_ROOT")
     local_candidates = discover_local_instances() if automatic_local_selection else []
-    workspace = workspace_state(target)
+    workspace = workspace_state(
+        target,
+        default_name=(repository_name.split("/", 1)[-1] if repository_name else None),
+    )
     if workspace["state"] == "invalid-path":
         raise KBError("the selected workspace is not a directory")
     local = local_plan(
         None if automatic_local_selection else workspace["root"],
         mode=mode,
         age_path=age_path,
+        default_name=(repository_name.split("/", 1)[-1] if repository_name else None),
     )
     dependency_installation = {"required": False, "manager": "existing", "command": []}
     dependency_confirmations: list[str] = []
@@ -495,15 +511,33 @@ def github_first_plan(
             action = "connect-discovered-repository"
             repository_confirmations = []
         else:
-            owner = account["login"]
-            repo, existing = _unique_default_repository(active, owner)
-            branch = "main" if existing is None else existing["default_branch"]
-            if existing is None:
-                action = "create-github-repository"
-                repository_confirmations = ["create-github-repository"]
-            else:
-                action = "connect-discovered-repository"
-                repository_confirmations = []
+            confirmations = [*dependency_confirmations, *local["confirmation_required"]]
+            confirmations.append("choose-repository-name")
+            return {
+                "status": "needs-input",
+                "flow": "agent-onboarding",
+                "runtime": resolved_runtime,
+                "domain_kind": "personal",
+                "module_kind": "knowledge",
+                "subject_id": f"person:github:{account['login']}",
+                "workspace": workspace["root"],
+                "workspace_state": workspace["state"],
+                "repository": None,
+                "repository_action": "choose-repository-name",
+                "suggested_repository_name": suggested_repository_name(
+                    Path(workspace["root"])
+                ),
+                "repository_visibility": visibility,
+                "required_inputs": ["repository-name"],
+                "confirmation_required": list(dict.fromkeys(confirmations)),
+                "dependency_installation": {
+                    "age": {
+                        "required": dependency_installation["required"],
+                        "manager": dependency_installation["manager"],
+                    }
+                },
+                "local_plan": local,
+            }
     local_layout = (
         _local_instance_layout(workspace["root"])
         if workspace["state"] == "existing-instance"
@@ -511,7 +545,6 @@ def github_first_plan(
     )
     if (
         automatic_local_selection
-        and repository_name is None
         and len(local_candidates) <= 1
         and (
             local_layout.startswith("legacy")
@@ -522,20 +555,21 @@ def github_first_plan(
         if base is None:
             selected_root = Path(workspace["root"])
             base = selected_root.parent if workspace["state"] == "existing-instance" else Path.cwd()
-        modern_target = base / DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME
+        target_name = repository_name or DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME
+        modern_target = base / target_name
         suffix = 2
         while modern_target.exists():
-            modern_target = base / f"{DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME}-{suffix}"
+            modern_target = base / f"{target_name}-{suffix}"
             suffix += 1
         legacy_target = (
             str(Path(workspace["root"]).resolve())
             if workspace["state"] == "existing-instance"
             else str((base / repo).resolve())
         )
-        confirmations = [
-            *dependency_confirmations,
-            "select-migration-legacy-or-empty-current-instance",
-        ]
+        confirmations = [*dependency_confirmations]
+        if repository_name is None:
+            confirmations.append("choose-repository-name")
+        confirmations.append("select-migration-legacy-or-empty-current-instance")
         return {
             "status": "needs-confirmation",
             "flow": "agent-onboarding",
@@ -547,10 +581,16 @@ def github_first_plan(
             "workspace_state": workspace["state"],
             "repository": None,
             "repository_action": "select-legacy-migration-or-current-instance",
+            "suggested_repository_name": DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME,
+            "required_inputs": ["repository-name"] if repository_name is None else [],
             "repository_options": [
                 {
                     "choice": "migrate-current",
-                    "repository": f"{account['login']}/{DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME}",
+                    "repository": (
+                        f"{account['login']}/{repository_name}"
+                        if repository_name
+                        else None
+                    ),
                     "target": str(modern_target.resolve()),
                     "layout": "current",
                     "recommended": True,
@@ -567,7 +607,11 @@ def github_first_plan(
                 },
                 {
                     "choice": "create-empty-current",
-                    "repository": f"{account['login']}/{DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME}",
+                    "repository": (
+                        f"{account['login']}/{repository_name}"
+                        if repository_name
+                        else None
+                    ),
                     "target": str(modern_target.resolve()),
                     "layout": "current-empty",
                     "existing_content_copied": False,
@@ -684,6 +728,8 @@ def github_first_setup(
         run_initial_sync=run_initial_sync,
     )
     if plan["repository"] is None:
+        if plan.get("repository_action") == "choose-repository-name":
+            raise KBError("choose a GitHub repository name before setup")
         raise KBError("choose one discovered knowledge repository before setup")
     if "create-github-repository" in plan["confirmation_required"] and not confirm_repository_create:
         raise KBError("GitHub repository creation requires confirmation")
@@ -697,6 +743,16 @@ def github_first_setup(
         raise KBError("production setup requires explicit production key confirmation")
     if run_initial_sync and not confirm_initial_sync:
         raise KBError("initial GitHub sync requires confirmation")
+    migration_state_path = Path(plan["workspace"]) / ".atlas" / "state" / "knowledge-migration.json"
+    if run_initial_sync and migration_state_path.is_file():
+        try:
+            migration_state = json.loads(migration_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise KBError("migration state is invalid; refusing initial sync") from exc
+        if migration_state.get("status") != "verified":
+            raise KBError(
+                "migration semantic review must finish before initial GitHub sync"
+            )
     resolved_age = _preflight(resolved_dependency_age, require_git=initialize_git)
     owner, repo = plan["repository"].split("/", 1)
     created = False
@@ -767,7 +823,24 @@ def github_first_setup(
         "repository_binding": bool(git_remote_bound),
         "initial_sync": bool(run_initial_sync and sync.get("pushed")),
     }
+    migration_retirement_required = False
+    migration_retirement_complete = True
+    if migration_state_path.is_file():
+        migration_retirement_required = True
+        migration_state = json.loads(migration_state_path.read_text(encoding="utf-8"))
+        migration_retirement_complete = isinstance(
+            migration_state.get("retirement"), dict
+        )
+        validation["migration_retirement"] = migration_retirement_complete
     onboarding_complete = all(validation.values())
+    terminal_state = "complete" if onboarding_complete else "partial"
+    if (
+        run_initial_sync
+        and sync.get("pushed")
+        and migration_retirement_required
+        and not migration_retirement_complete
+    ):
+        terminal_state = "needs-retirement-selection"
     return {
         "status": "ok",
         "flow": "agent-onboarding",
@@ -789,7 +862,9 @@ def github_first_setup(
         "verified": local["verification"]["ok"],
         "validation": validation,
         "onboarding_complete": onboarding_complete,
-        "terminal_state": "complete" if onboarding_complete else "partial",
+        "terminal_state": terminal_state,
+        "retirement_required": migration_retirement_required,
+        "retirement_complete": migration_retirement_complete,
         "next_prompts": local["next_prompts"],
     }
 
@@ -910,6 +985,7 @@ def local_setup(
         knowledge_root = resolve_knowledge_root(root)
         if layout_kind == "domain-root":
             ensure_personal_domain_manifest(root)
+            ensure_personal_knowledge_workspace(root)
         else:
             ensure_instance_manifest(root)
         initialized = {
@@ -980,7 +1056,7 @@ def local_setup(
         "verification": verification,
         "self_test": self_test,
         "next_prompts": [
-            "把这段内容保存到基础区。",
+            "把这段内容保存到知识库。",
             "搜索我关于某个主题的资料。",
             "锁定知识库并清理临时明文。",
         ],
@@ -1001,11 +1077,13 @@ def save(
     content: str,
     summary: str = "",
     kind: str = "raw",
+    lifecycle: str = "active",
     confirm_public: bool = False,
     origin_kind: str = "unknown",
     authorship_status: str = "unknown",
     contributors: tuple[str, ...] = (),
     source_refs: tuple[str, ...] = (),
+    interaction_refs: tuple[str, ...] = (),
     intended_role: str | None = None,
     corpus_eligibility: str = "denied",
     style_eligibility: str = "denied",
@@ -1014,9 +1092,14 @@ def save(
     clarification_refs: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     routed_module = {
+        "memory": "memory",
         "creation": "creations",
         "cognition": "cognition",
+        "capability": "capabilities",
         "work": "work",
+        "product": "products",
+        "relationship": "relationships",
+        "governance": "governance",
         "publication": "products",
     }.get(intended_role or "")
     if routed_module:
@@ -1037,12 +1120,14 @@ def save(
         title=title,
         summary=summary,
         content=content,
+        lifecycle=lifecycle,
         catalog_visibility="public" if tier == "public" else "private",
         human_confirmed=confirm_public,
         origin_kind=origin_kind,
         authorship_status=authorship_status,
         contributors=contributors,
         source_refs=source_refs,
+        interaction_refs=interaction_refs,
         intended_role=intended_role or "unknown",
         corpus_eligibility=corpus_eligibility,
         style_eligibility=style_eligibility,

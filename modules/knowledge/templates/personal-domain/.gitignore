@@ -1,8 +1,42 @@
 # Local runtime and editor artifacts
 .17deg-atlas/
-.atlas/
 .local/
+.atlas/state/
+.atlas/review/
+.atlas/indexes/
+.atlas/runs/
+.atlas/projections/
+.atlas/runtime/.local/
+.atlas/runtime/inbox/
+.atlas/runtime/docs/
+.atlas/runtime/questions/
+.atlas/runtime/reference/
+.atlas/runtime/receipts/
+.atlas/runtime/recovery/
+knowledge/inbox/
+knowledge/raw/
+knowledge/library/
+knowledge/wiki/
+knowledge/.atlas-view-manifest.json
 .DS_Store
 Thumbs.db
 *.tmp
 *.log
+
+# Never commit plaintext from private compatibility tiers.
+.atlas/runtime/vault/basic/**/*.md
+.atlas/runtime/vault/basic/**/*.txt
+.atlas/runtime/vault/basic/**/*.json
+.atlas/runtime/vault/advanced/**/*.md
+.atlas/runtime/vault/advanced/**/*.txt
+.atlas/runtime/vault/advanced/**/*.json
+.atlas/runtime/vault/core/**/*.md
+.atlas/runtime/vault/core/**/*.txt
+.atlas/runtime/vault/core/**/*.json
+
+# Credentials and local secrets.
+*.identity
+*.key
+*.pem
+.env
+.env.*

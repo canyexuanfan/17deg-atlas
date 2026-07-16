@@ -66,11 +66,16 @@ AUTHORSHIP_STATUSES = (
     "unknown",
 )
 INTENDED_ROLES = (
+    "memory",
     "evidence",
     "knowledge",
     "creation",
     "cognition",
+    "capability",
     "work",
+    "product",
+    "relationship",
+    "governance",
     "publication",
     "unknown",
 )
@@ -121,6 +126,7 @@ def new_semantic_fields(
     authorship_status: str = "unknown",
     contributors: list[str] | None = None,
     source_refs: list[str] | None = None,
+    interaction_refs: list[str] | None = None,
     intended_role: str | None = None,
     corpus_eligibility: str = "denied",
     style_eligibility: str = "denied",
@@ -163,6 +169,7 @@ def new_semantic_fields(
         "authorship_status": authorship_status,
         "contributors": list(contributors or []),
         "source_refs": list(source_refs or []),
+        "interaction_refs": list(interaction_refs or []),
         "intended_role": resolved_role,
         "corpus_eligibility": corpus_eligibility,
         "style_eligibility": style_eligibility,
@@ -198,6 +205,7 @@ def materialize_semantic_fields(envelope: Mapping[str, Any]) -> dict[str, Any]:
     result.setdefault("authorship_status", "unknown")
     result.setdefault("contributors", [])
     result.setdefault("source_refs", [])
+    result.setdefault("interaction_refs", [])
     result.setdefault("intended_role", "unknown")
     result.setdefault("corpus_eligibility", "denied")
     result.setdefault("style_eligibility", "denied")
@@ -215,7 +223,11 @@ def clarification_questions(envelope: Mapping[str, Any]) -> list[str]:
         )
     if envelope.get("intended_role") == "unknown":
         questions.append(
-            "Should this be treated as reference knowledge, a personal creation, cognition, work output, or a publication?"
+            "Should this be treated as memory, reference knowledge, a personal creation, cognition, capability, work, product, relationship, governance, or a publication?"
+        )
+    if envelope.get("media_type") == "conversation" and not envelope.get("interaction_refs"):
+        questions.append(
+            "Which conversation and message or segment identifiers support this knowledge extract?"
         )
     if envelope.get("rights") == "unknown":
         questions.append(
@@ -265,7 +277,7 @@ def validate_semantic_fields(envelope: Mapping[str, Any]) -> list[str]:
         issues.append("training_permission is invalid")
     if envelope.get("clarification_status") not in CLARIFICATION_STATES:
         issues.append("clarification_status is invalid")
-    for field in ("contributors", "source_refs", "clarification_refs"):
+    for field in ("contributors", "source_refs", "interaction_refs", "clarification_refs"):
         values = envelope.get(field)
         if not isinstance(values, list) or any(not isinstance(item, str) or not item for item in (values or [])):
             issues.append(f"{field} must be a string array")
@@ -277,6 +289,14 @@ def validate_semantic_fields(envelope: Mapping[str, Any]) -> list[str]:
         issues.append("answered clarification requires known authorship_status and intended_role")
     if envelope.get("clarification_status") == "required" and envelope.get("review_state") != "candidate":
         issues.append("unresolved clarification must remain a candidate")
+    if (
+        envelope.get("schema_version") == 4
+        and kind == "raw"
+        and envelope.get("media_type") == "conversation"
+        and envelope.get("intended_role") in ("evidence", "knowledge")
+        and not envelope.get("interaction_refs")
+    ):
+        issues.append("conversation knowledge raw requires interaction_refs")
     if (
         envelope.get("corpus_eligibility") == "approved"
         or envelope.get("style_eligibility") == "approved"

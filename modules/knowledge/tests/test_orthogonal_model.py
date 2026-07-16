@@ -261,6 +261,50 @@ class OrthogonalModelAcceptanceTests(unittest.TestCase):
             self.assertEqual([], validate_orthogonal_fields(adapted))
             self.assertEqual("advanced", adapted["classification"]["level"])
 
+    def test_o13_human_access_and_lifecycle_compile_to_compatibility_storage(self) -> None:
+        private_receipt = self.vault.add_by_access(
+            request_id="o13-private-archived",
+            access="basic",
+            lifecycle="archived",
+            kind="raw",
+            title="Archived private knowledge",
+            summary="",
+            content="private archive",
+            rights="owned",
+        )
+        private_path = self.vault._locate_object(private_receipt["object_id"])
+        private = self.vault._read_object_path(private_path, self.identities)
+        self.assertEqual("basic", private["tier"])
+        self.assertEqual("basic", private["classification"]["level"])
+        self.assertEqual("archived", private["lifecycle"])
+
+        public_receipt = self.vault.add_by_access(
+            request_id="o13-public-archived",
+            access="public",
+            lifecycle="archived",
+            kind="raw",
+            title="Archived public knowledge",
+            summary="",
+            content="public archive",
+            rights="owned",
+            human_confirmed=True,
+        )
+        public_path = self.vault._locate_object(public_receipt["object_id"])
+        public = self.vault._read_object_path(public_path)
+        self.assertEqual("archive", public["tier"])
+        self.assertEqual("public", public["classification"]["level"])
+        self.assertEqual("archived", public["lifecycle"])
+
+        with self.assertRaises(KBError):
+            self.vault.add_by_access(
+                request_id="o13-invalid-access",
+                access="archive",
+                kind="raw",
+                title="Invalid",
+                summary="",
+                content="invalid",
+            )
+
     def test_remote_inbox_event_carries_orthogonal_fields_without_identity(self) -> None:
         class Adapter:
             owner = "example"

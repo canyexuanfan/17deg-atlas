@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from .bootstrap import (
     KNOWLEDGE_MODULE_RELATIVE,
     LEGACY_KNOWLEDGE_MODULE_RELATIVES,
+    PERSONAL_DOMAIN_RUNTIME_RELATIVE,
     initialize_personal_domain,
     is_knowledge_module_root,
     is_personal_domain_root,
@@ -21,6 +22,7 @@ from .bootstrap import (
 )
 from .core import KBError, KnowledgeVault
 from .github_onboarding import GitHubCLIEnvironment, configured_repository
+from .workspace_views import materialize_workspace_views
 
 
 MIGRATION_STATE = Path(".atlas") / "state" / "knowledge-migration.json"
@@ -31,10 +33,13 @@ TARGET_MANAGED_FILES = {
     "LICENSES.md",
     "README.md",
     "config/instance.json",
+    "config/policies.yml",
     "config/projection.yml",
+    "config/tiers.yml",
     "index.jsonl",
     "index.md",
     "manifests/catalog.jsonl",
+    "manifests/projection-selection.json",
 }
 TARGET_MANAGED_PREFIXES = (
     "config/schemas/",
@@ -99,7 +104,7 @@ def _layout(root: Path) -> str:
         relative = knowledge_root.relative_to(root)
     except ValueError:
         return "unknown"
-    if relative == KNOWLEDGE_MODULE_RELATIVE:
+    if relative in (KNOWLEDGE_MODULE_RELATIVE, PERSONAL_DOMAIN_RUNTIME_RELATIVE):
         return "current"
     if relative in LEGACY_KNOWLEDGE_MODULE_RELATIVES:
         return "legacy-deep"
@@ -152,7 +157,11 @@ def _file_action(relative: str) -> str:
         folded.startswith(prefix) for prefix in TARGET_MANAGED_PREFIXES
     ):
         return "preserve-current-template"
-    return "copy-content"
+    if folded.startswith("vault/"):
+        return "copy-object"
+    if folded.startswith(("receipts/", "recovery/")):
+        return "preserve-local-history"
+    return "semantic-import-candidate"
 
 
 def _migration_files(source_knowledge: Path) -> list[dict[str, Any]]:
@@ -244,7 +253,8 @@ def migration_plan(
             f"{repository['owner']}/{repository['repo']}" if repository else None
         ),
         "target": str(target_root),
-        "target_knowledge_root": str(target_root / KNOWLEDGE_MODULE_RELATIVE),
+        "target_knowledge_root": str(target_root / PERSONAL_DOMAIN_RUNTIME_RELATIVE),
+        "target_knowledge_workspace": str(target_root / KNOWLEDGE_MODULE_RELATIVE),
         "target_state": target_state,
         "files": files,
         "counts": counts,
@@ -408,9 +418,16 @@ def migrate_instance(
         "completed_files": [],
     }
     _atomic_json(state_path, state)
-    target_knowledge = stage / KNOWLEDGE_MODULE_RELATIVE
-    backup_root = target_knowledge / ".local" / "migration-source-files"
+    target_knowledge = resolve_knowledge_root(stage)
+    backup_root = stage / ".atlas" / "review" / "migration-source-files"
+    history_root = stage / ".atlas" / "review" / "migration-history"
+    inbox_root = stage / KNOWLEDGE_MODULE_RELATIVE / "inbox" / "migration"
     completed = set(str(value) for value in state.get("completed_files", []))
+    semantic_candidates = {
+        str(item.get("path")): dict(item)
+        for item in state.get("semantic_candidates", [])
+        if isinstance(item, Mapping) and item.get("path")
+    }
     copied = 0
     preserved = 0
     for item in plan["files"]:
@@ -424,6 +441,35 @@ def migrate_instance(
             if not backup.is_file() or _sha256(backup) != item["sha256"]:
                 _copy_atomic(source_path, backup)
             preserved += 1
+            continue
+        if action == "preserve-local-history":
+            destination = history_root / Path(relative)
+            if not destination.is_file() or _sha256(destination) != item["sha256"]:
+                _copy_atomic(source_path, destination)
+            completed.add(relative)
+            continue
+        if action == "semantic-import-candidate":
+            destination = inbox_root / Path(relative)
+            if not destination.is_file() or _sha256(destination) != item["sha256"]:
+                _copy_atomic(source_path, destination)
+            semantic_candidates[relative] = {
+                "path": relative,
+                "staged_path": destination.relative_to(stage).as_posix(),
+                "bytes": item["bytes"],
+                "sha256": item["sha256"],
+                "status": semantic_candidates.get(relative, {}).get("status", "pending"),
+                "raw_object_id": semantic_candidates.get(relative, {}).get("raw_object_id"),
+                "wiki_object_ids": semantic_candidates.get(relative, {}).get("wiki_object_ids", []),
+            }
+            completed.add(relative)
+            state["semantic_candidates"] = [
+                semantic_candidates[name] for name in sorted(semantic_candidates)
+            ]
+            state["completed_files"] = sorted(completed)
+            _atomic_json(state_path, state)
+            copied += 1
+            if _fail_after is not None and copied >= _fail_after:
+                raise KBError("simulated migration interruption")
             continue
         if action == "transfer-credential" and not confirm_local_credential_transfer:
             continue
@@ -450,14 +496,23 @@ def migrate_instance(
         state["verification"] = verification
         _atomic_json(state_path, state)
         raise KBError("migrated knowledge verification failed")
+    pending_candidates = [
+        item for item in semantic_candidates.values() if item.get("status") != "completed"
+    ]
     state.update(
         {
-            "status": "verified",
-            "verified_at": _utc_now(),
+            "status": "needs-semantic-review" if pending_candidates else "verified",
+            "verified_at": None if pending_candidates else _utc_now(),
             "verification": verification,
             "copied_files": copied,
             "preserved_template_files": preserved,
             "source_preserved": True,
+            "semantic_import": {
+                "candidate_count": len(semantic_candidates),
+                "completed_count": len(semantic_candidates) - len(pending_candidates),
+                "pending_count": len(pending_candidates),
+                "llm_wiki_required": bool(pending_candidates),
+            },
         }
     )
     _atomic_json(state_path, state)
@@ -471,10 +526,14 @@ def migrate_instance(
         "flow": "knowledge-instance-migration",
         "source": str(source_root),
         "target": str(target_root),
-        "knowledge_root": str(target_root / KNOWLEDGE_MODULE_RELATIVE),
+        "knowledge_root": str(resolve_knowledge_root(target_root)),
+        "knowledge_workspace": str(target_root / KNOWLEDGE_MODULE_RELATIVE),
         "copied_files": copied,
         "preserved_template_files": preserved,
-        "verified": True,
+        "verified": not pending_candidates,
+        "original_files_verified": True,
+        "semantic_import": state["semantic_import"],
+        "terminal_state": "needs-semantic-review" if pending_candidates else "ready-for-retirement",
         "verification": verification,
         "resumed": bool(existing_state),
         "source_preserved": source_root.exists(),
@@ -484,11 +543,130 @@ def migrate_instance(
     }
 
 
+def record_migration_candidate(
+    target: str | Path,
+    *,
+    source_path: str,
+    raw_object_id: str,
+    wiki_object_ids: list[str] | tuple[str, ...] = (),
+    identities: Mapping[str, str | Path] | None = None,
+    confirm_raw_only: bool = False,
+    age_path: str | Path | None = None,
+) -> dict[str, Any]:
+    target_root = Path(target).expanduser().resolve()
+    state_path = target_root / MIGRATION_STATE
+    state = _read_json(state_path)
+    if not state or state.get("status") not in ("needs-semantic-review", "verified"):
+        raise KBError("target does not contain a semantic migration review")
+    candidates = state.get("semantic_candidates")
+    if not isinstance(candidates, list):
+        raise KBError("migration semantic candidate list is unavailable")
+    selected = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, dict) and str(item.get("path")) == source_path
+        ),
+        None,
+    )
+    if selected is None:
+        raise KBError("migration semantic candidate does not exist")
+    staged = target_root / str(selected["staged_path"])
+    if not staged.is_file() or _sha256(staged) != selected.get("sha256"):
+        raise KBError("migration candidate source verification failed")
+    try:
+        staged_content = staged.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise KBError("migration candidate requires text extraction before import") from exc
+    vault = KnowledgeVault(resolve_knowledge_root(target_root), age_path=age_path)
+    raw_path = vault._locate_object(raw_object_id)
+    raw = vault._read_object_path(raw_path, identities)
+    if raw.get("object_kind") != "raw" or str(raw.get("content")) != staged_content:
+        raise KBError("migration raw object does not preserve the staged source")
+    wiki_kinds: set[str] = set()
+    verified_wiki_ids: list[str] = []
+    view_envelopes: list[Mapping[str, Any]] = [raw]
+    for object_id in wiki_object_ids:
+        path = vault._locate_object(object_id)
+        envelope = vault._read_object_path(path, identities)
+        if envelope.get("object_kind") != "wiki":
+            raise KBError("migration compiled object must be a wiki object")
+        sources = {
+            *[str(value) for value in envelope.get("source_ids", [])],
+            *[str(value) for value in envelope.get("source_refs", [])],
+        }
+        if raw_object_id not in sources:
+            raise KBError("migration wiki object is not traceable to the raw source")
+        wiki_kinds.add(str(envelope.get("wiki_kind")))
+        verified_wiki_ids.append(object_id)
+        view_envelopes.append(envelope)
+    required_wiki = {"source_summary", "atomic_card", "topic_page"}
+    if not confirm_raw_only and not required_wiki.issubset(wiki_kinds):
+        raise KBError(
+            "migration LLM Wiki requires source_summary, atomic_card, and topic_page"
+        )
+    selected.update(
+        {
+            "status": "completed",
+            "raw_object_id": raw_object_id,
+            "wiki_object_ids": verified_wiki_ids,
+            "wiki_kinds": sorted(wiki_kinds),
+            "completed_at": _utc_now(),
+            "raw_only": bool(confirm_raw_only),
+        }
+    )
+    pending = [
+        item for item in candidates if isinstance(item, dict) and item.get("status") != "completed"
+    ]
+    state["semantic_import"] = {
+        "candidate_count": len(candidates),
+        "completed_count": len(candidates) - len(pending),
+        "pending_count": len(pending),
+        "llm_wiki_required": any(
+            isinstance(item, dict) and not item.get("raw_only") for item in candidates
+        ),
+    }
+    if not pending:
+        verification = vault.verify(identities=identities)
+        if not verification["ok"] or not verification["objects_checked"]:
+            raise KBError("semantic migration object verification failed")
+        state["status"] = "verified"
+        state["verified_at"] = _utc_now()
+        state["verification"] = verification
+    views = materialize_workspace_views(target_root, view_envelopes)
+    _atomic_json(state_path, state)
+    return {
+        "status": "ok" if not pending else "needs-semantic-review",
+        "flow": "knowledge-migration-semantic-review",
+        "source_path": source_path,
+        "raw_object_id": raw_object_id,
+        "wiki_object_ids": verified_wiki_ids,
+        "pending_count": len(pending),
+        "migration_verified": not pending,
+        "objects_checked": (
+            state.get("verification", {}).get("objects_checked", 0)
+            if isinstance(state.get("verification"), Mapping)
+            else 0
+        ),
+        "workspace_views": views,
+        "terminal_state": "ready-for-retirement" if not pending else "needs-semantic-review",
+    }
+
+
 def _migration_state(target: Path) -> dict[str, Any]:
     state = _read_json(target / MIGRATION_STATE)
     if not state or state.get("status") != "verified":
         raise KBError("target does not contain a verified migration")
     return state
+
+
+def _record_retirement(target: Path, details: Mapping[str, Any]) -> None:
+    state_path = target / MIGRATION_STATE
+    state = _read_json(state_path)
+    if not state:
+        raise KBError("migration state is unavailable")
+    state["retirement"] = {**dict(details), "completed_at": _utc_now()}
+    _atomic_json(state_path, state)
 
 
 def retirement_plan(source: str | Path, target: str | Path) -> dict[str, Any]:
@@ -578,13 +756,16 @@ def retire_source(
     target_root = Path(plan["target"])
     repository = plan["source_repository"]
     if action == "preserve":
-        return {
+        result = {
             "status": "ok",
             "flow": "knowledge-instance-retirement",
             "action": "preserve",
             "source_preserved": source_root.exists(),
             "source_repository_preserved": bool(repository),
+            "terminal_state": "complete",
         }
+        _record_retirement(target_root, result)
+        return result
     if (source_root / ".git").exists():
         dirty = _git(source_root, "status", "--porcelain")
         if dirty.returncode != 0 or dirty.stdout.strip():
@@ -597,14 +778,17 @@ def retire_source(
         if archived.exists():
             raise KBError("source archive target already exists")
         source_root.replace(archived)
-        return {
+        result = {
             "status": "ok",
             "flow": "knowledge-instance-retirement",
             "action": "archive",
             "archived_source": str(archived),
             "source_repository_preserved": bool(repository),
             "git_history_backup": backup,
+            "terminal_state": "complete",
         }
+        _record_retirement(target_root, result)
+        return result
     if not delete_local and not delete_remote:
         raise KBError("select local deletion, remote deletion, or both")
     if delete_remote:
@@ -625,7 +809,7 @@ def retire_source(
             raise KBError("local source deletion requires explicit confirmation")
         if source_root.exists():
             _remove_tree(source_root)
-    return {
+    result = {
         "status": "ok",
         "flow": "knowledge-instance-retirement",
         "action": "delete",
@@ -633,4 +817,7 @@ def retire_source(
         "remote_deleted": bool(delete_remote),
         "source_repository": repository,
         "git_history_backup": backup,
+        "terminal_state": "complete",
     }
+    _record_retirement(target_root, result)
+    return result
