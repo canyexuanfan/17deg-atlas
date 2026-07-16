@@ -12,17 +12,25 @@ os.environ["ATLAS_WORKSPACE"] = str(WORKSPACE)
 os.environ["ATLAS_ENTRY_RUNTIME"] = "remote"
 launcher = WORKSPACE / ".17deg-atlas" / "bin" / "17deg-atlas.py"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from runtime import require_product_root  # noqa: E402
+
+try:
+    product_root = require_product_root()
+except RuntimeError as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(2) from exc
+
 if launcher.is_file():
-    runpy.run_path(str(launcher), run_name="__main__")
-else:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from runtime import require_product_root  # noqa: E402
+    from bootstrap import BootstrapError, bootstrap  # noqa: E402
 
     try:
-        product_root = require_product_root()
-    except RuntimeError as exc:
+        bootstrap(WORKSPACE, source=product_root)
+    except BootstrapError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from exc
+    runpy.run_path(str(launcher), run_name="__main__")
+else:
     sys.path.insert(0, str(product_root / "src"))
     from kb_vault.atlas_cli import main  # noqa: E402
 

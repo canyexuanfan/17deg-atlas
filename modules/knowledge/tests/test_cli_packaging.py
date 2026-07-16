@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +68,14 @@ class CLIPackagingAcceptanceTests(unittest.TestCase):
             launcher = Path(installed["cli_path"])
             self.assertTrue(launcher.is_file())
             self.assertTrue((workspace / ".17deg-atlas" / "state" / "runtime.json").is_file())
+            runtime = json.loads(
+                (workspace / ".17deg-atlas" / "state" / "runtime.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(2, runtime["schema_version"])
+            self.assertEqual(64, len(runtime["source_fingerprint"]))
+            self.assertIn("source_commit", runtime)
             version = self.run_python(launcher, "--version", cwd=workspace)
             self.assertEqual(0, version.returncode, version.stderr)
             self.assertEqual("17deg-atlas 0.1.0", version.stdout.strip())
@@ -81,6 +91,64 @@ class CLIPackagingAcceptanceTests(unittest.TestCase):
             )
             self.assertEqual(0, initialized.returncode, initialized.stderr)
             self.assertTrue((instance / "knowledge").is_dir())
+
+    def test_skill_entry_refreshes_a_stale_runtime_before_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "refresh-workspace"
+            bootstrap = self.run_python(
+                LOCAL_SCRIPTS / "bootstrap.py",
+                "--workspace",
+                str(workspace),
+                "--source",
+                str(REPOSITORY_ROOT),
+            )
+            self.assertEqual(0, bootstrap.returncode, bootstrap.stderr)
+            installed_module = workspace / ".17deg-atlas" / "tool" / "modules" / "knowledge"
+            if not installed_module.is_dir():
+                installed_module = workspace / ".17deg-atlas" / "tool"
+            stale_marker = installed_module / "src" / "kb_vault" / "stale-runtime.txt"
+            stale_marker.write_text("stale\n", encoding="utf-8")
+
+            version = self.run_python(
+                LOCAL_SCRIPTS / "atlas.py", "--version", cwd=workspace
+            )
+            self.assertEqual(0, version.returncode, version.stderr)
+            self.assertEqual("17deg-atlas 0.1.0", version.stdout.strip())
+            self.assertFalse(stale_marker.exists())
+            self.assertTrue((workspace / ".17deg-atlas" / "tool.previous").is_dir())
+
+    def test_runtime_refresh_restores_previous_tool_when_validation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "rollback-workspace"
+            installed = self.run_python(
+                LOCAL_SCRIPTS / "bootstrap.py",
+                "--workspace",
+                str(workspace),
+                "--source",
+                str(REPOSITORY_ROOT),
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            installed_module = workspace / ".17deg-atlas" / "tool" / "modules" / "knowledge"
+            if not installed_module.is_dir():
+                installed_module = workspace / ".17deg-atlas" / "tool"
+            stale_marker = installed_module / "src" / "kb_vault" / "stale-runtime.txt"
+            stale_marker.write_text("stale\n", encoding="utf-8")
+
+            spec = importlib.util.spec_from_file_location(
+                "atlas_local_bootstrap_test", LOCAL_SCRIPTS / "bootstrap.py"
+            )
+            assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            with mock.patch.object(
+                module,
+                "install_cli",
+                side_effect=module.BootstrapError("validation failed"),
+            ):
+                with self.assertRaises(module.BootstrapError):
+                    module.bootstrap(workspace, source=REPOSITORY_ROOT)
+            self.assertTrue(stale_marker.is_file())
+            self.assertFalse((workspace / ".17deg-atlas" / "tool.previous").exists())
 
     def test_local_and_remote_skills_call_one_cli_with_fixed_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

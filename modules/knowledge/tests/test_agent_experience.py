@@ -747,6 +747,72 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual(age.resolve(), resolved)
         self.assertEqual(1, len(commands))
 
+    def test_windows_age_is_found_outside_path_without_reinstalling(self) -> None:
+        package = self.base / "WinGet" / "age"
+        package.mkdir(parents=True)
+        age = package / "age.exe"
+        keygen = package / "age-keygen.exe"
+        age.write_bytes(b"age")
+        keygen.write_bytes(b"age-keygen")
+        environment = LocalDependencyEnvironment(
+            which=lambda _name: None,
+            system="windows",
+            common_paths={"age": [age]},
+        )
+        installation = environment.age_installation()
+        self.assertFalse(installation["required"])
+        self.assertEqual("existing", installation["manager"])
+        self.assertEqual(age.resolve(), environment.install_age())
+
+    def test_github_cli_discovers_instances_with_one_graphql_request(self) -> None:
+        commands = []
+        manifest = {
+            "domain_kind": "personal",
+            "modules": [{"module_kind": "knowledge", "path": "knowledge"}],
+            "subject_id": "person:github:example-user",
+        }
+
+        def runner(command, **kwargs):
+            del kwargs
+            commands.append(command)
+            if command[1:3] == ["api", "user"]:
+                payload = {"login": "example-user"}
+            else:
+                payload = {
+                    "data": {
+                        "user": {
+                            "repositories": {
+                                "nodes": [
+                                    {
+                                        "name": "personal-space",
+                                        "isPrivate": True,
+                                        "url": "https://github.com/example-user/personal-space",
+                                        "defaultBranchRef": {"name": "main"},
+                                        "personal": {"text": json.dumps(manifest)},
+                                        "instance": None,
+                                        "knowledge": None,
+                                        "deepKnowledge": None,
+                                        "legacyKnowledge": None,
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+        client = GitHubCLIRepositoryClient("gh", runner=runner)
+        self.assertEqual("example-user", client.account()["login"])
+        discovered = client.discover_instances(
+            domain_kind="personal",
+            module_kind="knowledge",
+            subject_id="person:github:example-user",
+        )
+        self.assertEqual(["personal-space"], [value["name"] for value in discovered])
+        self.assertEqual(2, len(commands))
+        self.assertEqual(["api", "graphql"], commands[1][1:3])
+        self.assertFalse(any("/contents/" in argument for command in commands for argument in command))
+
     def test_initial_sync_commits_and_pushes_to_local_bare_remote(self) -> None:
         if not self.age:
             self.skipTest("set KB_TEST_AGE or install age")

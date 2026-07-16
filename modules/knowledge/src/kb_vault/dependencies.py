@@ -21,16 +21,47 @@ def _existing_path(candidates: list[Path]) -> str | None:
     return None
 
 
-def discover_age_executable(age_path: str | Path | None = None) -> Path | None:
-    suffix = ".exe" if os.name == "nt" else ""
+def _windows_age_candidates() -> list[Path]:
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
+    user_profile = Path(os.environ.get("USERPROFILE", ""))
+    program_data = Path(os.environ.get("ProgramData", ""))
+    program_files = Path(os.environ.get("ProgramFiles", ""))
+    candidates = [
+        user_profile / "scoop" / "apps" / "age" / "current" / "age.exe",
+        program_data / "chocolatey" / "bin" / "age.exe",
+        program_files / "age" / "age.exe",
+    ]
+    packages = local_app_data / "Microsoft" / "WinGet" / "Packages"
+    try:
+        candidates.extend(
+            package / "age" / "age.exe"
+            for package in packages.glob("FiloSottile.age_*")
+        )
+    except OSError:
+        pass
+    return candidates
+
+
+def discover_age_executable(
+    age_path: str | Path | None = None,
+    *,
+    common_paths: Mapping[str, list[Path]] | None = None,
+    system: str | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> Path | None:
+    active_system = (system or platform.system()).lower()
+    suffix = ".exe" if active_system == "windows" else ""
     candidates: list[Path] = []
     configured = age_path or os.environ.get("KB_AGE_PATH")
     if configured:
         candidates.append(Path(configured))
     if workspace := atlas_workspace():
         candidates.append(workspace / ".17deg-atlas" / "bin" / f"age{suffix}")
-    if discovered := shutil.which("age"):
+    candidates.extend((common_paths or {}).get("age", []))
+    if discovered := which("age"):
         candidates.append(Path(discovered))
+    if active_system == "windows":
+        candidates.extend(_windows_age_candidates())
     for candidate in candidates:
         try:
             resolved = candidate.expanduser().resolve()
@@ -95,8 +126,16 @@ class LocalDependencyEnvironment:
             ]
         return _existing_path(candidates)
 
+    def discover_age(self, age_path: str | Path | None = None) -> Path | None:
+        return discover_age_executable(
+            age_path,
+            common_paths=self.common_paths,
+            system=self.system,
+            which=self.which,
+        )
+
     def age_installation(self, age_path: str | Path | None = None) -> dict[str, Any]:
-        if discover_age_executable(age_path):
+        if self.discover_age(age_path):
             return {"required": False, "manager": "existing", "command": []}
         candidates: list[tuple[str, list[str]]] = []
         if self.system == "windows":
@@ -148,7 +187,7 @@ class LocalDependencyEnvironment:
     ) -> Path:
         plan = self.age_installation(age_path)
         if not plan["required"]:
-            resolved = discover_age_executable(age_path)
+            resolved = self.discover_age(age_path)
             if resolved is None:
                 raise KBError("age installation could not be verified")
             return resolved
@@ -157,12 +196,12 @@ class LocalDependencyEnvironment:
         if not confirm:
             raise KBError("age installation requires confirmation")
         result = self.runner(plan["command"], check=False)
-        if result.returncode != 0:
-            raise KBError("age installation failed")
-        resolved = discover_age_executable(age_path)
+        resolved = self.discover_age(age_path)
         if resolved is None:
             discovered = self.which("age")
             resolved = Path(discovered).resolve() if discovered else None
+        if result.returncode != 0 and resolved is None:
+            raise KBError("age installation failed")
         if resolved is None or not resolved.is_file():
             raise KBError("age installation could not be verified")
         return resolved

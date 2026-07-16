@@ -317,6 +317,7 @@ class GitHubCLIRepositoryClient:
     def __init__(self, executable: str, *, runner: Callable[..., Any] = subprocess.run):
         self.executable = executable
         self.runner = runner
+        self._account_login = ""
 
     def _run(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
@@ -374,10 +375,13 @@ class GitHubCLIRepositoryClient:
         }
 
     def account(self) -> dict[str, str]:
+        if self._account_login:
+            return {"login": self._account_login}
         payload = self._json(["api", "user"])
         login = str(payload.get("login", "")).strip() if isinstance(payload, dict) else ""
         if not login:
             raise KBError("GitHub connection could not identify the current account")
+        self._account_login = login
         return {"login": login}
 
     def repository(self, owner: str, name: str) -> dict[str, Any] | None:
@@ -456,11 +460,53 @@ class GitHubCLIRepositoryClient:
         module_kind: str = "knowledge",
         subject_id: str = "",
     ) -> list[dict[str, Any]]:
+        owner = self.account()["login"]
+        query = """
+query($login: String!) {
+  user(login: $login) {
+    repositories(first: 100, ownerAffiliations: OWNER, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        name
+        isPrivate
+        url
+        defaultBranchRef { name }
+        personal: object(expression: "HEAD:personal.yaml") { ... on Blob { text } }
+        instance: object(expression: "HEAD:config/instance.json") { ... on Blob { text } }
+        knowledge: object(expression: "HEAD:knowledge/config/tiers.yml") { id }
+        deepKnowledge: object(expression: "HEAD:domains/personal/knowledge/config/tiers.yml") { id }
+        legacyKnowledge: object(expression: "HEAD:config/tiers.yml") { id }
+      }
+    }
+  }
+}
+""".strip()
+        payload = self._json(
+            ["api", "graphql", "-f", f"query={query}", "-F", f"login={owner}"]
+        )
+        try:
+            nodes = payload["data"]["user"]["repositories"]["nodes"]
+        except (KeyError, TypeError):
+            raise KBError("GitHub knowledge repository discovery failed")
+        if not isinstance(nodes, list):
+            raise KBError("GitHub knowledge repository discovery failed")
         discovered: list[dict[str, Any]] = []
-        for repository in self.repositories():
-            owner = repository["owner"]
-            name = repository["name"]
-            manifest = self.instance_manifest(owner, name)
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                continue
+            repository = self._repository({**node, "owner": owner})
+            manifest = None
+            for key in ("personal", "instance"):
+                blob = node.get(key)
+                text = blob.get("text") if isinstance(blob, Mapping) else None
+                if not isinstance(text, str):
+                    continue
+                try:
+                    value = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, Mapping):
+                    manifest = dict(value)
+                    break
             if _manifest_matches(
                 manifest,
                 domain_kind=domain_kind,
@@ -470,12 +516,16 @@ class GitHubCLIRepositoryClient:
                 discovered.append({**repository, "instance": manifest})
                 continue
             legacy_subject = f"person:github:{owner}"
+            legacy_marker = any(
+                isinstance(node.get(key), Mapping)
+                for key in ("knowledge", "deepKnowledge", "legacyKnowledge")
+            )
             if (
                 manifest is None
                 and domain_kind == "personal"
                 and module_kind == "knowledge"
                 and (not subject_id or subject_id == legacy_subject)
-                and self.has_legacy_instance_marker(owner, name)
+                and legacy_marker
             ):
                 discovered.append(repository)
         return discovered
