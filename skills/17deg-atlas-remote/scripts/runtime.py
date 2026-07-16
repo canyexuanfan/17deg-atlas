@@ -28,7 +28,16 @@ def find_product_root() -> Path | None:
     script = Path(__file__).resolve()
     candidates.extend(script.parents)
     workspace = Path(os.environ.get("ATLAS_WORKSPACE", Path.cwd())).expanduser().resolve()
-    candidates.extend([workspace, workspace / ".17deg-atlas" / "tool"])
+    candidates.extend(
+        [
+            workspace / ".codex" / "reference" / "17deg-atlas",
+            workspace / ".claudian" / "reference" / "17deg-atlas",
+            workspace / ".agents" / "reference" / "17deg-atlas",
+            workspace / "reference" / "17deg-atlas",
+            workspace,
+            workspace / ".17deg-atlas" / "tool",
+        ]
+    )
     if configured_home := os.environ.get("ATLAS_TOOL_HOME"):
         candidates.append(Path(configured_home))
     seen: set[Path] = set()

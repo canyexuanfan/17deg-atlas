@@ -41,6 +41,7 @@ from .github_onboarding import (
     suggested_repository_name,
 )
 from .registry import atlas_workspace, register_instance, registered_instances
+from .migration import MIGRATION_STATE, migration_repair_plan
 
 
 PRIVATE_TIERS = ("basic", "advanced", "core")
@@ -50,6 +51,58 @@ IDENTITY_ENVS = {
     "core": "KB_AGE_IDENTITY_CORE_FILE",
 }
 INSTANCE_MARKERS = ("config/tiers.yml", "config/policies.yml", "manifests/projection-selection.json")
+
+
+def _tool_runtime_state() -> dict[str, Any]:
+    return {
+        "update_check": os.environ.get("ATLAS_RUNTIME_UPDATE_CHECK", "not-reported"),
+        "source_commit": os.environ.get("ATLAS_RUNTIME_SOURCE_COMMIT", ""),
+        "refreshed": os.environ.get("ATLAS_RUNTIME_REFRESHED", "false").lower() == "true",
+    }
+
+
+def _migration_gate(root: str | Path, runtime: str) -> dict[str, Any] | None:
+    target = Path(root).expanduser().resolve()
+    state_path = target / MIGRATION_STATE
+    if not state_path.is_file():
+        return None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "status": "blocked",
+            "terminal_state": "invalid-migration-state",
+            "reason": "migration-state-is-unreadable",
+        }
+    repair = migration_repair_plan(target)
+    if repair["repair_required"]:
+        return {
+            "status": "needs-confirmation",
+            "terminal_state": "needs-migration-repair",
+            "confirmation_required": repair["confirmation_required"],
+            "next_action": "migration-repair-plan",
+            "execution_entry": "local",
+            "repair": repair,
+        }
+    status = str(state.get("status", ""))
+    if status == "needs-semantic-review":
+        return {
+            "status": "needs-action",
+            "terminal_state": "needs-semantic-review",
+            "confirmation_required": [],
+            "next_action": "migration-review",
+            "execution_entry": "local",
+            "pending_count": state.get("semantic_import", {}).get("pending_count"),
+        }
+    if status not in ("verified",):
+        return {
+            "status": "blocked",
+            "terminal_state": "migration-incomplete",
+            "reason": f"migration-status-{status or 'unknown'}",
+            "next_action": "migration-plan",
+            "execution_entry": "local" if runtime == "local" else "local",
+        }
+    return None
 
 
 def _request_id(action: str) -> str:
@@ -402,6 +455,53 @@ def github_first_plan(
         age_path=age_path,
         default_name=(repository_name.split("/", 1)[-1] if repository_name else None),
     )
+    resolved_runtime = detect_agent_runtime(runtime)
+    tool_runtime = _tool_runtime_state()
+    if (
+        tool_runtime["update_check"] == "unavailable"
+        and not tool_runtime["source_commit"]
+    ):
+        return {
+            "status": "blocked",
+            "flow": "agent-onboarding",
+            "runtime": resolved_runtime,
+            "tool_runtime": tool_runtime,
+            "domain_kind": "personal",
+            "module_kind": "knowledge",
+            "subject_id": None,
+            "workspace": workspace["root"],
+            "workspace_state": workspace["state"],
+            "repository": None,
+            "repository_action": "retry-tool-update-check",
+            "reason": "tool-runtime-version-could-not-be-verified",
+            "terminal_state": "runtime-update-unverified",
+            "onboarding_complete": False,
+            "confirmation_required": [],
+            "local_plan": local,
+        }
+    migration_gate = _migration_gate(workspace["root"], resolved_runtime)
+    if migration_gate is not None:
+        remembered_migration_repository = configured_repository(Path(workspace["root"]))
+        repository_value = (
+            f"{remembered_migration_repository['owner']}/{remembered_migration_repository['repo']}"
+            if remembered_migration_repository
+            else None
+        )
+        return {
+            **migration_gate,
+            "flow": "agent-onboarding",
+            "runtime": resolved_runtime,
+            "tool_runtime": _tool_runtime_state(),
+            "domain_kind": "personal",
+            "module_kind": "knowledge",
+            "subject_id": None,
+            "workspace": workspace["root"],
+            "workspace_state": workspace["state"],
+            "repository": repository_value,
+            "repository_action": "pause-for-migration-upgrade",
+            "local_plan": local,
+            "onboarding_complete": False,
+        }
     dependency_installation = {"required": False, "manager": "existing", "command": []}
     dependency_confirmations: list[str] = []
     if dependency_environment is not None or (client is None and token is None):
@@ -440,7 +540,6 @@ def github_first_plan(
     else:
         active = _github_client(client, token=token)
     account = active.account()
-    resolved_runtime = detect_agent_runtime(runtime)
     discovered_layout = "unknown"
     remembered = configured_repository(Path(workspace["root"]))
     if remembered:
@@ -658,6 +757,7 @@ def github_first_plan(
         else "blocked" if local["status"] == "blocked" else "ready",
         "flow": "agent-onboarding",
         "runtime": resolved_runtime,
+        "tool_runtime": _tool_runtime_state(),
         "domain_kind": "personal",
         "module_kind": "knowledge",
         "subject_id": f"person:github:{account['login']}",
@@ -727,6 +827,13 @@ def github_first_setup(
         dependency_environment=dependencies,
         run_initial_sync=run_initial_sync,
     )
+    if plan.get("terminal_state") in (
+        "needs-migration-repair",
+        "needs-semantic-review",
+        "migration-incomplete",
+        "invalid-migration-state",
+    ):
+        return plan
     if plan["repository"] is None:
         if plan.get("repository_action") == "choose-repository-name":
             raise KBError("choose a GitHub repository name before setup")
@@ -845,6 +952,7 @@ def github_first_setup(
         "status": "ok",
         "flow": "agent-onboarding",
         "runtime": plan["runtime"],
+        "tool_runtime": _tool_runtime_state(),
         "domain_kind": plan["domain_kind"],
         "module_kind": plan["module_kind"],
         "subject_id": plan["subject_id"],

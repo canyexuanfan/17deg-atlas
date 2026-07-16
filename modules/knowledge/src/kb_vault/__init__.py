@@ -9,8 +9,10 @@ from .retrieval import TrustedRetrieval
 from .migration import (
     migrate_instance,
     migration_plan,
+    migration_repair_plan,
     prepare_migration_source,
     record_migration_candidate,
+    repair_migration,
     retirement_plan,
     retire_source,
 )
@@ -39,9 +41,11 @@ __all__ = [
     "KnowledgeCapabilities",
     "TrustedRetrieval",
     "migration_plan",
+    "migration_repair_plan",
     "migrate_instance",
     "prepare_migration_source",
     "record_migration_candidate",
+    "repair_migration",
     "retirement_plan",
     "retire_source",
     "PublicAtlas",

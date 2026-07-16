@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -139,6 +140,71 @@ class CLIPackagingAcceptanceTests(unittest.TestCase):
             self.assertFalse(stale_marker.exists())
             self.assertTrue((workspace / ".17deg-atlas" / "tool.previous").is_dir())
 
+    def test_copied_project_skill_refreshes_an_unversioned_runtime_from_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            local_remote = Path(temporary) / "atlas-remote.git"
+            prepared_remote = subprocess.run(
+                ["git", "clone", "--bare", str(REPOSITORY_ROOT), str(local_remote)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(0, prepared_remote.returncode, prepared_remote.stderr)
+            workspace = Path(temporary) / "copied-skill-workspace"
+            installed = self.run_python(
+                LOCAL_SCRIPTS / "bootstrap.py",
+                "--workspace",
+                str(workspace),
+                "--source",
+                str(REPOSITORY_ROOT),
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            runtime_path = workspace / ".17deg-atlas" / "state" / "runtime.json"
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            runtime["source_commit"] = "0" * 40
+            runtime_path.write_text(
+                json.dumps(runtime, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            installed_module = workspace / ".17deg-atlas" / "tool" / "modules" / "knowledge"
+            if not installed_module.is_dir():
+                installed_module = workspace / ".17deg-atlas" / "tool"
+            stale_marker = installed_module / "src" / "kb_vault" / "copied-skill-stale.txt"
+            stale_marker.write_text("stale\n", encoding="utf-8")
+            copied_skill = workspace / ".codex" / "skills" / "17deg-atlas-local"
+            copied_skill.parent.mkdir(parents=True)
+            shutil.copytree(LOCAL_SCRIPTS.parent, copied_skill)
+            environment = os.environ.copy()
+            environment["ATLAS_REPOSITORY"] = str(local_remote)
+            result = subprocess.run(
+                [sys.executable, str(copied_skill / "scripts" / "atlas.py"), "--version"],
+                cwd=workspace,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            refreshed = json.loads(runtime_path.read_text(encoding="utf-8"))
+            self.assertFalse(
+                stale_marker.exists(),
+                f"stdout={result.stdout!r} stderr={result.stderr!r} runtime={refreshed!r}",
+            )
+            expected_commit = subprocess.run(
+                ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "HEAD"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=True,
+            ).stdout.strip()
+            self.assertEqual(expected_commit, refreshed["source_commit"])
+            self.assertEqual("updated", refreshed["update_check"])
+
     def test_runtime_refresh_restores_previous_tool_when_validation_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary) / "rollback-workspace"
@@ -171,6 +237,38 @@ class CLIPackagingAcceptanceTests(unittest.TestCase):
                     module.bootstrap(workspace, source=REPOSITORY_ROOT)
             self.assertTrue(stale_marker.is_file())
             self.assertFalse((workspace / ".17deg-atlas" / "tool.previous").exists())
+
+    def test_offline_update_check_preserves_the_last_verified_source_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "offline-workspace"
+            installed = self.run_python(
+                LOCAL_SCRIPTS / "bootstrap.py",
+                "--workspace",
+                str(workspace),
+                "--source",
+                str(REPOSITORY_ROOT),
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            state_path = workspace / ".17deg-atlas" / "state" / "runtime.json"
+            before = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertTrue(before["source_commit"])
+            spec = importlib.util.spec_from_file_location(
+                "atlas_local_bootstrap_offline_test", LOCAL_SCRIPTS / "bootstrap.py"
+            )
+            assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.LAST_UPDATE_ERROR = "simulated-offline"
+            with mock.patch.object(module, "remote_head", return_value=""):
+                result = module.bootstrap(
+                    workspace,
+                    source=workspace / ".17deg-atlas" / "tool",
+                    check_updates=True,
+                )
+            self.assertEqual("unavailable", result["update_check"])
+            after = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(before["source_commit"], after["source_commit"])
+            self.assertEqual("unavailable", after["update_check"])
 
     def test_local_and_remote_skills_call_one_cli_with_fixed_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

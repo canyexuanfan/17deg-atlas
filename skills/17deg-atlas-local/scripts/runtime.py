@@ -30,6 +30,10 @@ def find_product_root() -> Path | None:
     workspace = Path(os.environ.get("ATLAS_WORKSPACE", Path.cwd())).expanduser().resolve()
     candidates.extend(
         [
+            workspace / ".codex" / "reference" / "17deg-atlas",
+            workspace / ".claudian" / "reference" / "17deg-atlas",
+            workspace / ".agents" / "reference" / "17deg-atlas",
+            workspace / "reference" / "17deg-atlas",
             workspace,
             workspace / ".17deg-atlas" / "tool",
         ]

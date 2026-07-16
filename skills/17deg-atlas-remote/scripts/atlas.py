@@ -21,9 +21,25 @@ except RuntimeError as exc:
 
 from bootstrap import BootstrapError, bootstrap  # noqa: E402
 
+
+def entry_is_bundled_with_source(source: Path) -> bool:
+    entry = Path(__file__).resolve()
+    for candidate in (source, *source.parents):
+        expected = candidate / "skills" / "17deg-atlas-remote" / "scripts" / "atlas.py"
+        if expected.resolve() == entry:
+            return True
+    return False
+
 try:
-    installed = bootstrap(WORKSPACE, source=product_root)
+    installed = bootstrap(
+        WORKSPACE,
+        source=product_root,
+        check_updates=not entry_is_bundled_with_source(product_root),
+    )
 except BootstrapError as exc:
     print(str(exc), file=sys.stderr)
     raise SystemExit(2) from exc
+os.environ["ATLAS_RUNTIME_UPDATE_CHECK"] = str(installed.get("update_check", "unknown"))
+os.environ["ATLAS_RUNTIME_SOURCE_COMMIT"] = str(installed.get("source_commit", ""))
+os.environ["ATLAS_RUNTIME_REFRESHED"] = "true" if installed.get("runtime_refreshed") else "false"
 runpy.run_path(str(installed["cli_path"]), run_name="__main__")

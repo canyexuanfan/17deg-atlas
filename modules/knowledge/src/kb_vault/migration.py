@@ -181,6 +181,223 @@ def _migration_files(source_knowledge: Path) -> list[dict[str, Any]]:
     return files
 
 
+def _semantic_completed_paths(state: Mapping[str, Any]) -> list[str]:
+    return sorted(
+        {
+            normalized
+            for value in state.get("completed_files", [])
+            if isinstance(value, str)
+            and (normalized := _safe_migration_relative(value)) is not None
+            and _file_action(normalized) == "semantic-import-candidate"
+        }
+    )
+
+
+def _safe_migration_relative(value: str) -> str | None:
+    folded = value.replace("\\", "/").strip()
+    candidate = Path(folded)
+    if (
+        not folded
+        or candidate.is_absolute()
+        or re.match(r"^[A-Za-z]:", folded)
+        or any(part in ("", ".", "..") for part in candidate.parts)
+    ):
+        return None
+    return candidate.as_posix()
+
+
+def _candidate_source(target: Path, state: Mapping[str, Any], relative: str) -> Path | None:
+    candidates = [
+        target / KNOWLEDGE_MODULE_RELATIVE / Path(relative),
+        resolve_knowledge_root(target) / Path(relative),
+    ]
+    source_value = str(state.get("source", "")).strip()
+    if source_value:
+        source_root = Path(source_value).expanduser()
+        if source_root.exists():
+            try:
+                candidates.append(resolve_knowledge_root(source_root) / Path(relative))
+            except KBError:
+                pass
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def migration_repair_plan(target: str | Path) -> dict[str, Any]:
+    target_root = Path(target).expanduser().resolve()
+    state = _read_json(target_root / MIGRATION_STATE)
+    if not state:
+        return {
+            "status": "not-applicable",
+            "flow": "knowledge-migration-repair",
+            "target": str(target_root),
+            "repair_required": False,
+            "reasons": [],
+            "candidate_count": 0,
+        }
+    semantic_paths = _semantic_completed_paths(state)
+    invalid_paths = sorted(
+        str(value)
+        for value in state.get("completed_files", [])
+        if isinstance(value, str) and _safe_migration_relative(value) is None
+    )
+    verification = state.get("verification")
+    objects_checked = (
+        int(verification.get("objects_checked", 0))
+        if isinstance(verification, Mapping)
+        else 0
+    )
+    reasons: list[str] = []
+    if state.get("status") == "verified" and semantic_paths and objects_checked <= 0:
+        reasons.append("semantic-files-have-no-verified-objects")
+    if state.get("status") == "verified" and semantic_paths and not isinstance(
+        state.get("semantic_import"), Mapping
+    ):
+        reasons.append("semantic-import-receipt-is-missing")
+    recorded_candidates = state.get("semantic_candidates")
+    if state.get("status") == "verified" and semantic_paths and not isinstance(
+        recorded_candidates, list
+    ):
+        reasons.append("semantic-candidate-records-are-missing")
+    if invalid_paths:
+        reasons.append("invalid-completed-file-paths")
+    found: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for relative in semantic_paths:
+        source = _candidate_source(target_root, state, relative)
+        if source is None:
+            missing.append(relative)
+            continue
+        found.append(
+            {
+                "path": relative,
+                "source_path": str(source),
+                "bytes": source.stat().st_size,
+                "sha256": _sha256(source),
+            }
+        )
+    repair_required = bool(reasons)
+    return {
+        "status": "needs-confirmation" if repair_required else "ok",
+        "flow": "knowledge-migration-repair",
+        "target": str(target_root),
+        "source": state.get("source"),
+        "migration_status": state.get("status"),
+        "repair_required": repair_required,
+        "reasons": reasons,
+        "objects_checked": objects_checked,
+        "candidate_count": len(semantic_paths),
+        "recoverable_count": len(found),
+        "missing_count": len(missing),
+        "invalid_count": len(invalid_paths),
+        "candidates": found,
+        "missing_paths": missing,
+        "invalid_paths": invalid_paths,
+        "confirmation_required": (
+            ["confirm-migration-state-repair"] if repair_required else []
+        ),
+        "next_action": "migration-repair-start" if repair_required else None,
+        "terminal_state": "needs-migration-repair" if repair_required else "current",
+    }
+
+
+def repair_migration(
+    target: str | Path,
+    *,
+    confirm_migration_state_repair: bool = False,
+) -> dict[str, Any]:
+    target_root = Path(target).expanduser().resolve()
+    plan = migration_repair_plan(target_root)
+    if not plan["repair_required"]:
+        return {**plan, "status": "ok", "changed": False}
+    if not confirm_migration_state_repair:
+        raise KBError("migration state repair requires explicit confirmation")
+    if plan["missing_count"]:
+        raise KBError("migration repair cannot locate every recorded source file")
+    if plan["invalid_count"]:
+        raise KBError("migration repair contains unsafe recorded source paths")
+    state_path = target_root / MIGRATION_STATE
+    state = _read_json(state_path)
+    if not state:
+        raise KBError("migration state is unavailable")
+    inbox_root = target_root / KNOWLEDGE_MODULE_RELATIVE / "inbox" / "migration"
+    backup_root = target_root / ".atlas" / "review" / "migration-upgrade-originals"
+    workspace_root = (target_root / KNOWLEDGE_MODULE_RELATIVE).resolve()
+    semantic_candidates: list[dict[str, Any]] = []
+    moved_from_workspace = 0
+    for item in plan["candidates"]:
+        relative = str(item["path"])
+        source = Path(str(item["source_path"])).resolve()
+        destination = inbox_root / Path(relative)
+        backup = backup_root / Path(relative)
+        if not backup.is_file() or _sha256(backup) != item["sha256"]:
+            _copy_atomic(source, backup)
+        if not destination.is_file() or _sha256(destination) != item["sha256"]:
+            _copy_atomic(source, destination)
+        if _sha256(destination) != item["sha256"]:
+            raise KBError(f"migration repair copy verification failed: {relative}")
+        if source != destination.resolve():
+            try:
+                source.relative_to(workspace_root)
+            except ValueError:
+                pass
+            else:
+                if _sha256(backup) != _sha256(source):
+                    raise KBError(f"migration repair backup verification failed: {relative}")
+                source.unlink()
+                moved_from_workspace += 1
+                parent = source.parent
+                while parent != workspace_root and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+        semantic_candidates.append(
+            {
+                "path": relative,
+                "staged_path": destination.relative_to(target_root).as_posix(),
+                "bytes": int(item["bytes"]),
+                "sha256": str(item["sha256"]),
+                "status": "pending",
+                "raw_object_id": None,
+                "wiki_object_ids": [],
+            }
+        )
+    prior_verification = state.get("verification")
+    state.update(
+        {
+            "status": "needs-semantic-review",
+            "verified_at": None,
+            "semantic_candidates": semantic_candidates,
+            "semantic_import": {
+                "candidate_count": len(semantic_candidates),
+                "completed_count": 0,
+                "pending_count": len(semantic_candidates),
+                "llm_wiki_required": bool(semantic_candidates),
+            },
+            "upgrade": {
+                "repaired_at": _utc_now(),
+                "reasons": plan["reasons"],
+                "legacy_verification": prior_verification,
+                "backup_root": backup_root.relative_to(target_root).as_posix(),
+            },
+        }
+    )
+    state.pop("verification", None)
+    _atomic_json(state_path, state)
+    return {
+        "status": "needs-semantic-review",
+        "flow": "knowledge-migration-repair",
+        "target": str(target_root),
+        "changed": True,
+        "candidate_count": len(semantic_candidates),
+        "moved_from_workspace": moved_from_workspace,
+        "backup_root": str(backup_root),
+        "terminal_state": "needs-semantic-review",
+        "next_action": "migration-review",
+    }
+
+
 def _private_tiers(files: list[dict[str, Any]]) -> list[str]:
     found: set[str] = set()
     for item in files:
@@ -213,7 +430,12 @@ def migration_plan(
             raise KBError("migration target is not a directory")
         state = _read_json(target_root / MIGRATION_STATE)
         if state and state.get("status") == "verified":
-            target_state = "migrated-instance"
+            repair = migration_repair_plan(target_root)
+            target_state = (
+                "migration-repair-required"
+                if repair["repair_required"]
+                else "migrated-instance"
+            )
         elif any(target_root.iterdir()):
             target_state = "occupied-directory"
         else:
@@ -374,6 +596,8 @@ def migrate_instance(
         raise KBError("local credential transfer requires explicit confirmation")
     if plan["target_state"] == "occupied-directory":
         raise KBError("migration target must be empty")
+    if plan["target_state"] == "migration-repair-required":
+        raise KBError("existing migration state requires repair before migration can continue")
     if plan["missing_identity_tiers"]:
         raise KBError(
             "identity is required to verify migrated private tiers: "
@@ -657,6 +881,8 @@ def _migration_state(target: Path) -> dict[str, Any]:
     state = _read_json(target / MIGRATION_STATE)
     if not state or state.get("status") != "verified":
         raise KBError("target does not contain a verified migration")
+    if migration_repair_plan(target)["repair_required"]:
+        raise KBError("target migration requires repair before source retirement")
     return state
 
 

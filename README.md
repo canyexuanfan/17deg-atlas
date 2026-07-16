@@ -48,7 +48,7 @@
 复制以下完整提示词给你的本地 Agent：
 
 ```
-请安装并使用这个 Skill：https://github.com/canyexuanfan/17deg-atlas/tree/main/skills/17deg-atlas-local 。如果不能直接安装 GitHub 子目录，请自动克隆 https://github.com/canyexuanfan/17deg-atlas 并加载 `skills/17deg-atlas-local`，不要让我手工执行命令。默认把入口 Skill 安装在当前项目内；除非我明确要求，不要安装为全局 Skill。安装后，在当前设备为我创建或连接知识库；需要 GitHub 操作时先向我确认，不要自行改成纯本地流程，并一直执行到工具确认首次连接完成。完成后直接向我报告，不要自行追加其他验收或安装。
+请安装或更新并使用这个 Skill：https://github.com/canyexuanfan/17deg-atlas/tree/main/skills/17deg-atlas-local 。如果不能直接安装 GitHub 子目录，请自动克隆 https://github.com/canyexuanfan/17deg-atlas 并加载 `skills/17deg-atlas-local`，不要让我手工执行命令。默认把入口 Skill 安装在当前项目内；除非我明确要求，不要安装为全局 Skill。然后在当前设备为我创建或连接知识库；已有实例需要升级时，按照工具返回结果继续完成必要的整理和确认。需要 GitHub 操作时先向我确认；敏感凭据、公开或删除也必须先确认。不要自行改成纯本地流程。一直执行到工具确认本次流程完成。完成后直接向我报告，不要自行追加其他验收或安装。
 ```
 
 ### 远端 Agent 完整提示词
@@ -56,7 +56,7 @@
 复制以下完整提示词给你的远端 Agent：
 
 ```
-请安装并使用这个 Skill：https://github.com/canyexuanfan/17deg-atlas/tree/main/skills/17deg-atlas-remote 。如果不能直接安装 GitHub 子目录，请自动克隆 https://github.com/canyexuanfan/17deg-atlas 并加载 `skills/17deg-atlas-remote`，不要让我手工执行命令。优先安装在当前项目；如果平台只支持固定 Skill 目录，则使用平台标准目录，不额外创建其他副本。安装后，把当前远端 Agent 连接到我的知识库，并一直执行到工具确认首次连接完成。完成后直接向我报告，不要自行追加其他验收或安装。
+请安装或更新并使用这个 Skill：https://github.com/canyexuanfan/17deg-atlas/tree/main/skills/17deg-atlas-remote 。如果不能直接安装 GitHub 子目录，请自动克隆 https://github.com/canyexuanfan/17deg-atlas 并加载 `skills/17deg-atlas-remote`，不要让我手工执行命令。优先安装在当前项目；如果平台只支持固定 Skill 目录，则使用平台标准目录，不额外创建其他副本。然后把当前远端 Agent 连接到我的知识库，并按照工具返回结果继续完成当前环境允许的步骤；需要在本人设备处理的升级不要在远端代做，直接告诉我改用本地入口。涉及 GitHub 写入、扩大访问范围、公开或删除时先向我确认。一直执行到工具确认本次流程完成。完成后直接向我报告，不要自行追加其他验收或安装。
 ```
 
 Skill 会自动准备项目所需工具，普通用户无需安装 CLI 或手工输入命令。

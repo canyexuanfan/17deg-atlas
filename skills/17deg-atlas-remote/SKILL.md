@@ -11,11 +11,13 @@ description: 远端入口 Skill，用于远端 Agent 连接个人知识库并执
 
 优先安装在当前项目；平台只支持固定 Skill 目录时使用平台标准目录，不额外创建其他副本。
 
-1. 必要时运行 `scripts/bootstrap.py`。
+1. 每次开始都先通过 `scripts/atlas.py` 进入工具，由入口核对并刷新项目运行时；若返回 `runtime-update-unverified`，安全停止并报告，不能继续使用来源不明的旧版本。
 2. 通过 `scripts/atlas.py workspace plan` 生成计划。
 3. 将同一计划中需要用户决定的真实动作汇总为一份确认清单；平台要求逐项确认时遵循平台要求。
 4. 通过 `scripts/atlas.py workspace start` 执行相同计划。
 5. 当结果同时包含 `onboarding_complete: true` 和 `terminal_state: complete` 时，向用户报告成功并停止。
+
+所有步骤以 CLI 返回的 `terminal_state` 和 `next_action` 为准。若返回 `needs-migration-repair`、`needs-semantic-review` 或 `execution_entry=local`，远端不得修复、复制凭据或模拟本地迁移；保持现有实例不变，并提示用户使用本地入口继续。
 
 工具返回多个连接或新建选项时，逐项标注现有内容去留与目标位置，等待用户选择；用户未明确选择前禁止新建、连接或迁移，保持现有内容不变。
 

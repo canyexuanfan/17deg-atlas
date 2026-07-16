@@ -33,8 +33,10 @@ from kb_vault.hermes import handle_hermes_request  # noqa: E402
 from kb_vault.migration import (  # noqa: E402
     migrate_instance,
     migration_plan,
+    migration_repair_plan,
     prepare_migration_source,
     record_migration_candidate,
+    repair_migration,
     retire_source,
     retirement_plan,
 )
@@ -239,6 +241,21 @@ def build_parser() -> argparse.ArgumentParser:
     migration_review_parser.add_argument("--wiki-object-id", action="append", default=[])
     migration_review_parser.add_argument("--confirm-raw-only", action="store_true")
     add_identity_args(migration_review_parser)
+
+    migration_repair_plan_parser = sub.add_parser(
+        "agent-migration-repair-plan",
+        help="audit an older migration receipt before it can be trusted",
+    )
+    migration_repair_plan_parser.add_argument("--target", type=Path, required=True)
+
+    migration_repair_start_parser = sub.add_parser(
+        "agent-migration-repair-start",
+        help="move recoverable legacy copies back into semantic review",
+    )
+    migration_repair_start_parser.add_argument("--target", type=Path, required=True)
+    migration_repair_start_parser.add_argument(
+        "--confirm-migration-state-repair", action="store_true"
+    )
 
     retirement_plan_parser = sub.add_parser(
         "agent-retirement-plan", help="plan the disposition of a verified migration source"
@@ -949,6 +966,13 @@ def execute(args: argparse.Namespace) -> object:
             identities=identities(args),
             confirm_raw_only=args.confirm_raw_only,
             age_path=args.age_path,
+        )
+    if args.command == "agent-migration-repair-plan":
+        return migration_repair_plan(args.target)
+    if args.command == "agent-migration-repair-start":
+        return repair_migration(
+            args.target,
+            confirm_migration_state_repair=args.confirm_migration_state_repair,
         )
     if args.command == "agent-retirement-plan":
         return retirement_plan(args.source, args.target)

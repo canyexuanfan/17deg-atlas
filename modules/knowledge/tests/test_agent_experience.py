@@ -79,6 +79,18 @@ class LocalAgentExperienceTests(unittest.TestCase):
             with self.assertRaises(KBError):
                 detect_agent_runtime("auto")
 
+    def test_unknown_offline_runtime_cannot_report_onboarding_complete(self) -> None:
+        environment = {
+            "ATLAS_RUNTIME_UPDATE_CHECK": "unavailable",
+            "ATLAS_RUNTIME_SOURCE_COMMIT": "",
+            "ATLAS_RUNTIME_REFRESHED": "false",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            result = github_first_plan(self.base / "vault", runtime="local")
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("runtime-update-unverified", result["terminal_state"])
+        self.assertFalse(result["onboarding_complete"])
+
     def test_u01_u02_u04_u05_plan_gate_and_no_internal_ids(self) -> None:
         plan = local_plan(self.base / "vault", mode="test")
         self.assertEqual("local-agent", plan["flow"])

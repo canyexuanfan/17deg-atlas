@@ -20,7 +20,7 @@ from kb_vault.bootstrap import (  # noqa: E402
     initialize_personal_domain,
     resolve_knowledge_root,
 )
-from kb_vault.agent import github_first_setup  # noqa: E402
+from kb_vault.agent import github_first_plan, github_first_setup  # noqa: E402
 from kb_vault.github_onboarding import (  # noqa: E402
     GitHubCLIRepositoryClient,
     GitHubRepositoryClient,
@@ -29,8 +29,10 @@ from kb_vault.github_onboarding import (  # noqa: E402
 from kb_vault.migration import (  # noqa: E402
     migrate_instance,
     migration_plan,
+    migration_repair_plan,
     prepare_migration_source,
     record_migration_candidate,
+    repair_migration,
     retire_source,
     retirement_plan,
 )
@@ -632,6 +634,87 @@ class InstanceMigrationAcceptanceTests(unittest.TestCase):
         self.assertTrue(root.exists())
         retirement = retire_source(root, target, action="preserve")
         self.assertEqual("complete", retirement["terminal_state"])
+
+    def test_m07b_old_false_complete_is_reopened_before_sync(self) -> None:
+        target = self.base / "current-with-old-receipt"
+        initialize_personal_domain(target)
+        legacy_document = target / "knowledge" / "questions" / "old-guide.md"
+        legacy_document.parent.mkdir(parents=True, exist_ok=True)
+        legacy_document.write_text(
+            "# Old guide\n\nThis document still needs semantic compilation.\n",
+            encoding="utf-8",
+        )
+        state_path = target / ".atlas" / "state" / "knowledge-migration.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "status": "verified",
+                    "source": str(self.base / "legacy-source"),
+                    "target": str(target),
+                    "completed_files": ["questions/old-guide.md"],
+                    "copied_files": 1,
+                    "verification": {"ok": True, "issues": [], "objects_checked": 0},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        repair_plan = migration_repair_plan(target)
+        self.assertTrue(repair_plan["repair_required"])
+        self.assertEqual("needs-migration-repair", repair_plan["terminal_state"])
+        self.assertEqual(1, repair_plan["recoverable_count"])
+        onboarding = github_first_plan(target, runtime="local")
+        self.assertEqual("needs-migration-repair", onboarding["terminal_state"])
+        self.assertFalse(onboarding["onboarding_complete"])
+        self.assertEqual("migration-repair-plan", onboarding["next_action"])
+        repaired = repair_migration(
+            target,
+            confirm_migration_state_repair=True,
+        )
+        self.assertEqual("needs-semantic-review", repaired["terminal_state"])
+        self.assertFalse(legacy_document.exists())
+        staged = target / "knowledge" / "inbox" / "migration" / "questions" / "old-guide.md"
+        backup = target / ".atlas" / "review" / "migration-upgrade-originals" / "questions" / "old-guide.md"
+        self.assertTrue(staged.is_file())
+        self.assertTrue(backup.is_file())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual("needs-semantic-review", state["status"])
+        self.assertEqual(1, state["semantic_import"]["pending_count"])
+        resumed = github_first_plan(target, runtime="local")
+        self.assertEqual("needs-semantic-review", resumed["terminal_state"])
+        self.assertEqual("migration-review", resumed["next_action"])
+
+    def test_m07c_migration_repair_rejects_unsafe_recorded_paths(self) -> None:
+        target = self.base / "unsafe-old-receipt"
+        initialize_personal_domain(target)
+        state_path = target / ".atlas" / "state" / "knowledge-migration.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "status": "verified",
+                    "source": str(self.base / "legacy-source"),
+                    "target": str(target),
+                    "completed_files": ["../outside.md"],
+                    "copied_files": 1,
+                    "verification": {"ok": True, "issues": [], "objects_checked": 0},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        plan = migration_repair_plan(target)
+        self.assertTrue(plan["repair_required"])
+        self.assertEqual(1, plan["invalid_count"])
+        with self.assertRaisesRegex(KBError, "unsafe recorded source paths"):
+            repair_migration(target, confirm_migration_state_repair=True)
 
     def test_m08_github_clients_delete_only_the_exact_repository_and_verify_absence(self) -> None:
         calls: list[tuple[str, str]] = []

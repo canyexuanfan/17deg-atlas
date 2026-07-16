@@ -20,6 +20,7 @@ MODULE_RELATIVES = (
 )
 CLI_VERSION = "0.1.0"
 ENTRY_RUNTIME = "local"
+LAST_UPDATE_ERROR = ""
 
 
 class BootstrapError(RuntimeError):
@@ -81,6 +82,49 @@ def git_value(source: Path, *arguments: str) -> str:
         check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def remote_head(repository: str) -> str:
+    global LAST_UPDATE_ERROR
+    LAST_UPDATE_ERROR = ""
+    git = shutil.which("git")
+    if not git or not repository:
+        LAST_UPDATE_ERROR = "git-or-repository-unavailable"
+        return ""
+    local_repository = Path(repository).expanduser()
+    if local_repository.exists():
+        value = git_value(local_repository, "rev-parse", "refs/heads/main")
+        if value:
+            return value
+        LAST_UPDATE_ERROR = "local-repository-main-is-unavailable"
+        return ""
+    result = subprocess.run(
+        [git, "ls-remote", repository, "refs/heads/main"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        LAST_UPDATE_ERROR = result.stderr.strip() or f"git-ls-remote-exit-{result.returncode}"
+        return ""
+    fields = result.stdout.strip().split()
+    return fields[0] if fields else ""
+
+
+def runtime_metadata(install_root: Path) -> dict[str, str]:
+    path = install_root / "state" / "runtime.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        str(key): str(item)
+        for key, item in value.items()
+        if isinstance(key, str) and isinstance(item, (str, int, float, bool))
+    }
 
 
 def source_metadata(source: Path, repository: str = "") -> dict[str, str]:
@@ -251,11 +295,49 @@ def bootstrap(
     source: Path | None = None,
     repository: str = DEFAULT_REPOSITORY,
     confirm_network_install: bool = False,
+    check_updates: bool = False,
 ) -> dict[str, object]:
     workspace = workspace.expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     install_root = workspace / ".17deg-atlas"
     target = install_root / "tool"
+    update_check = "not-requested"
+    source_metadata_hint: dict[str, str] | None = None
+    staged_source = install_root / "source.next"
+    if check_updates and source is not None:
+        source = source.expanduser().resolve()
+        current = source_metadata(source, repository)
+        installed = runtime_metadata(install_root)
+        latest = remote_head(repository)
+        if not latest:
+            update_check = "unavailable"
+            current["source_commit"] = (
+                current.get("source_commit") or installed.get("source_commit", "")
+            )
+            current["source_repository"] = (
+                current.get("source_repository")
+                or installed.get("source_repository", "")
+                or repository
+            )
+            source_metadata_hint = current
+        else:
+            baseline = current.get("source_commit") or installed.get("source_commit", "")
+            if baseline == latest:
+                update_check = "current"
+                current["source_commit"] = latest
+                current["source_repository"] = current.get("source_repository") or repository
+                source_metadata_hint = current
+            else:
+                if staged_source.exists():
+                    shutil.rmtree(staged_source)
+                install_root.mkdir(parents=True, exist_ok=True)
+                clone_source(repository, staged_source)
+                source = staged_source
+                source_metadata_hint = source_metadata(source, repository)
+                if source_metadata_hint.get("source_commit") != latest:
+                    shutil.rmtree(staged_source, ignore_errors=True)
+                    raise BootstrapError("downloaded runtime does not match the repository head")
+                update_check = "update-available"
     if module_root(target):
         metadata = source_metadata(target, repository)
         action = "connected-existing-runtime"
@@ -264,13 +346,22 @@ def bootstrap(
             source = source.expanduser().resolve()
             if module_root(source) is None:
                 raise BootstrapError("local bootstrap source is not a 17deg Atlas checkout")
-            incoming = source_metadata(source, repository)
+            incoming = source_metadata_hint or source_metadata(source, repository)
             if incoming["source_fingerprint"] != metadata["source_fingerprint"]:
                 backup = replace_runtime(source, install_root)
                 metadata = incoming
-                action = "updated-from-local-source"
+                action = (
+                    "updated-from-public-repository"
+                    if update_check == "update-available"
+                    else "updated-from-local-source"
+                )
             else:
                 metadata = incoming
+        metadata["update_check"] = (
+            "updated" if action == "updated-from-public-repository" else update_check
+        )
+        if LAST_UPDATE_ERROR:
+            metadata["update_error"] = LAST_UPDATE_ERROR
         try:
             cli = install_cli(install_root, target, metadata=metadata)
         except BootstrapError:
@@ -278,23 +369,28 @@ def bootstrap(
                 shutil.rmtree(target, ignore_errors=True)
                 backup.replace(target)
             raise
-        return {
+        result = {
             "status": "ok",
             "action": action,
             "workspace": str(workspace),
             "tool_root": str(target),
             "network_used": False,
-            "runtime_refreshed": action == "updated-from-local-source",
+            "runtime_refreshed": action.startswith("updated-from-"),
+            "update_check": "updated" if action == "updated-from-public-repository" else update_check,
+            "source_commit": metadata.get("source_commit", ""),
             "local_exclude_configured": ensure_local_exclude(workspace),
             **cli,
         }
+        if staged_source.exists():
+            shutil.rmtree(staged_source, ignore_errors=True)
+        return result
     if target.exists():
         raise BootstrapError("existing .17deg-atlas/tool is not a valid runtime")
     if source is not None:
         source = source.expanduser().resolve()
         if module_root(source) is None:
             raise BootstrapError("local bootstrap source is not a 17deg Atlas checkout")
-        metadata = source_metadata(source, repository)
+        metadata = source_metadata_hint or source_metadata(source, repository)
         install_root.mkdir(parents=True, exist_ok=True)
         copy_source(source, target)
         action = "installed-from-local-source"
@@ -313,8 +409,13 @@ def bootstrap(
     if resolved_module is None:
         shutil.rmtree(target, ignore_errors=True)
         raise BootstrapError("installed runtime failed structural validation")
+    metadata["update_check"] = (
+        "installed" if update_check == "update-available" else update_check
+    )
+    if LAST_UPDATE_ERROR:
+        metadata["update_error"] = LAST_UPDATE_ERROR
     cli = install_cli(install_root, target, metadata=metadata)
-    return {
+    result = {
         "status": "ok",
         "action": action,
         "workspace": str(workspace),
@@ -322,12 +423,17 @@ def bootstrap(
         "module_root": str(resolved_module),
         "network_used": network_used,
         "runtime_refreshed": False,
+        "update_check": "installed" if update_check == "update-available" else update_check,
+        "source_commit": metadata.get("source_commit", ""),
         "credentials_created": False,
         "global_skill_installed": False,
         "local_exclude_recommended": ".17deg-atlas/",
         "local_exclude_configured": ensure_local_exclude(workspace),
         **cli,
     }
+    if staged_source.exists():
+        shutil.rmtree(staged_source, ignore_errors=True)
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -336,6 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", type=Path)
     parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     parser.add_argument("--confirm-network-install", action="store_true")
+    parser.add_argument("--check-updates", action="store_true")
     return parser
 
 
@@ -347,6 +454,7 @@ def main() -> int:
             source=args.source,
             repository=args.repository,
             confirm_network_install=args.confirm_network_install,
+            check_updates=args.check_updates,
         )
     except BootstrapError as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
