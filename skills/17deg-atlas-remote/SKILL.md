@@ -17,6 +17,8 @@ description: 远端入口 Skill，用于远端 Agent 连接个人知识库并执
 4. 通过 `scripts/atlas.py workspace start` 执行相同计划。
 5. 当结果同时包含 `onboarding_complete: true` 和 `terminal_state: complete` 时，向用户报告成功并停止。
 
+工具返回多个连接或新建选项时，逐项标注现有内容去留与目标位置，等待用户选择；用户未明确选择前禁止新建、连接或迁移，保持现有内容不变。
+
 完成后不得自行追加再次连接、额外安装或其他验收动作。
 
 ## 自然语言路由

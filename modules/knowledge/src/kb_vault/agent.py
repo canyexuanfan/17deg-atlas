@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from .bootstrap import (
     KNOWLEDGE_MODULE_RELATIVE,
+    LEGACY_KNOWLEDGE_MODULE_RELATIVES,
     ensure_instance_manifest,
     ensure_personal_domain_manifest,
     initialize_instance,
@@ -37,7 +38,7 @@ from .github_onboarding import (
     resolve_github_token,
     suggested_repository_name,
 )
-from .registry import register_instance, registered_instances
+from .registry import atlas_workspace, register_instance, registered_instances
 
 
 PRIVATE_TIERS = ("basic", "advanced", "core")
@@ -68,16 +69,105 @@ def discover_identities(root: str | Path, *, include_test: bool = True) -> dict[
     return found
 
 
+def _local_instance_layout(root: str | Path) -> str:
+    selected = Path(root).expanduser().resolve()
+    if is_knowledge_module_root(selected):
+        return "legacy-module-root"
+    try:
+        knowledge_root = resolve_knowledge_root(selected)
+    except KBError:
+        return "unknown"
+    if knowledge_root == (selected / KNOWLEDGE_MODULE_RELATIVE).resolve():
+        return "current"
+    return "legacy-deep"
+
+
+def _manifest_instance_layout(manifest: Mapping[str, Any] | None) -> str:
+    if not isinstance(manifest, Mapping):
+        return "unknown"
+    if manifest.get("layout_kind") == "module-root":
+        return "legacy-module-root"
+    modules = manifest.get("modules")
+    if not isinstance(modules, list):
+        return "unknown"
+    for item in modules:
+        if not isinstance(item, Mapping) or item.get("module_kind") != "knowledge":
+            continue
+        configured = Path(str(item.get("path", "")).replace("\\", "/"))
+        if configured == KNOWLEDGE_MODULE_RELATIVE:
+            return "current"
+        if configured in LEGACY_KNOWLEDGE_MODULE_RELATIVES:
+            return "legacy-deep"
+    return "unknown"
+
+
+def discover_local_instances(
+    workspace: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    base = (
+        Path(workspace).expanduser().resolve()
+        if workspace is not None
+        else atlas_workspace() or Path.cwd().resolve()
+    )
+    discovered: dict[str, dict[str, Any]] = {}
+    for item in registered_instances(base):
+        root = Path(item["root"]).expanduser().resolve()
+        discovered[str(root).casefold()] = {**item, "root": str(root)}
+
+    candidates: list[Path] = []
+    if is_personal_domain_root(base) or is_knowledge_module_root(base):
+        candidates.append(base)
+    elif base.is_dir():
+        try:
+            candidates.extend(entry for entry in base.iterdir() if entry.is_dir())
+        except OSError:
+            pass
+    for candidate in candidates:
+        try:
+            root = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if not (is_personal_domain_root(root) or is_knowledge_module_root(root)):
+            continue
+        key = str(root).casefold()
+        record = dict(discovered.get(key, {}))
+        record["root"] = str(root)
+        record["knowledge_root"] = str(resolve_knowledge_root(root))
+        record["layout"] = _local_instance_layout(root)
+        repository = configured_repository(root)
+        if repository:
+            record["repository"] = {
+                "owner": repository["owner"],
+                "name": repository["repo"],
+                "branch": repository["branch"],
+            }
+        manifest_path = root / "config" / "instance.json"
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                manifest = None
+            if isinstance(manifest, dict):
+                for name in ("instance_id", "domain_kind", "subject_kind", "subject_id"):
+                    if manifest.get(name):
+                        record[name] = manifest[name]
+                record.setdefault("module_kind", "knowledge")
+        discovered[key] = record
+    return sorted(discovered.values(), key=lambda item: str(item["root"]).casefold())
+
+
 def resolve_workspace(target: str | Path | None = None) -> Path:
     selected = target or os.environ.get("KB_INSTANCE_ROOT")
     if selected:
         return Path(selected).expanduser().resolve()
-    current = Path.cwd().resolve()
+    current = atlas_workspace() or Path.cwd().resolve()
     if is_personal_domain_root(current) or is_knowledge_module_root(current):
         return current
-    registered = registered_instances()
-    if len(registered) == 1:
-        return Path(registered[0]["root"])
+    local_instances = discover_local_instances(current)
+    if len(local_instances) == 1:
+        return Path(local_instances[0]["root"])
+    if len(local_instances) > 1:
+        return current
     meaningful = [
         entry for entry in current.iterdir() if entry.name not in (".git", ".17deg-atlas")
     ]
@@ -156,13 +246,14 @@ def local_plan(
     }[workspace["state"]]
     confirmations: list[str] = []
     registry_choices = (
-        registered_instances()
+        discover_local_instances()
         if target is None and not os.environ.get("KB_INSTANCE_ROOT")
         else []
     )
     if len(registry_choices) > 1:
         confirmations.append("select-local-knowledge-instance")
-    if workspace["state"] == "occupied-directory":
+        action = "select-existing-local-instance"
+    elif workspace["state"] == "occupied-directory":
         confirmations.append("create-inside-nonempty-current-directory")
     if workspace["state"] == "invalid-path":
         confirmations.append("choose-valid-instance-directory")
@@ -175,7 +266,11 @@ def local_plan(
         local_root=workspace["root"],
     )
     automatic_steps = ["check-runtime"]
-    if workspace["is_instance"]:
+    if len(registry_choices) > 1:
+        automatic_steps.extend(
+            ["reuse-selected-instance", "verify-lock-and-recovery"]
+        )
+    elif workspace["is_instance"]:
         automatic_steps.extend(["connect-existing-instance", "verify-lock-and-recovery"])
     else:
         automatic_steps.extend(
@@ -281,10 +376,16 @@ def github_first_plan(
 ) -> dict[str, Any]:
     if visibility not in ("private", "public"):
         raise KBError("GitHub visibility must be private or public")
+    automatic_local_selection = target is None and not os.environ.get("KB_INSTANCE_ROOT")
+    local_candidates = discover_local_instances() if automatic_local_selection else []
     workspace = workspace_state(target)
     if workspace["state"] == "invalid-path":
         raise KBError("the selected workspace is not a directory")
-    local = local_plan(workspace["root"], mode=mode, age_path=age_path)
+    local = local_plan(
+        None if automatic_local_selection else workspace["root"],
+        mode=mode,
+        age_path=age_path,
+    )
     dependency_installation = {"required": False, "manager": "existing", "command": []}
     dependency_confirmations: list[str] = []
     if dependency_environment is not None or (client is None and token is None):
@@ -323,6 +424,7 @@ def github_first_plan(
     else:
         active = _github_client(client, token=token)
     account = active.account()
+    discovered_layout = "unknown"
     remembered = configured_repository(Path(workspace["root"]))
     if remembered:
         owner = remembered["owner"]
@@ -388,6 +490,7 @@ def github_first_plan(
             owner = existing["owner"]
             repo = existing["name"]
             branch = existing["default_branch"]
+            discovered_layout = _manifest_instance_layout(existing.get("instance"))
             action = "connect-discovered-repository"
             repository_confirmations = []
         else:
@@ -400,6 +503,94 @@ def github_first_plan(
             else:
                 action = "connect-discovered-repository"
                 repository_confirmations = []
+    local_layout = (
+        _local_instance_layout(workspace["root"])
+        if workspace["state"] == "existing-instance"
+        else "unknown"
+    )
+    if (
+        automatic_local_selection
+        and repository_name is None
+        and len(local_candidates) <= 1
+        and (
+            local_layout.startswith("legacy")
+            or discovered_layout.startswith("legacy")
+        )
+    ):
+        base = atlas_workspace()
+        if base is None:
+            selected_root = Path(workspace["root"])
+            base = selected_root.parent if workspace["state"] == "existing-instance" else Path.cwd()
+        modern_target = base / DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME
+        suffix = 2
+        while modern_target.exists():
+            modern_target = base / f"{DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME}-{suffix}"
+            suffix += 1
+        legacy_target = (
+            str(Path(workspace["root"]).resolve())
+            if workspace["state"] == "existing-instance"
+            else str((base / repo).resolve())
+        )
+        confirmations = [
+            *dependency_confirmations,
+            "select-legacy-or-current-instance",
+        ]
+        return {
+            "status": "needs-confirmation",
+            "flow": "agent-onboarding",
+            "runtime": detect_agent_runtime(runtime),
+            "domain_kind": "personal",
+            "module_kind": "knowledge",
+            "subject_id": f"person:github:{account['login']}",
+            "workspace": workspace["root"],
+            "workspace_state": workspace["state"],
+            "repository": None,
+            "repository_action": "select-legacy-or-current-instance",
+            "repository_options": [
+                {
+                    "choice": "connect-legacy",
+                    "repository": f"{owner}/{repo}",
+                    "target": legacy_target,
+                    "layout": "legacy-compatible",
+                },
+                {
+                    "choice": "create-current",
+                    "repository": f"{account['login']}/{DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME}",
+                    "target": str(modern_target.resolve()),
+                    "layout": "current",
+                    "recommended": True,
+                },
+            ],
+            "repository_visibility": visibility,
+            "confirmation_required": confirmations,
+            "dependency_installation": {
+                "age": {
+                    "required": dependency_installation["required"],
+                    "manager": dependency_installation["manager"],
+                }
+            },
+            "local_plan": local,
+        }
+    if automatic_local_selection and len(local_candidates) > 1:
+        matching_local = []
+        for candidate in local_candidates:
+            local_repository = candidate.get("repository")
+            if not isinstance(local_repository, Mapping):
+                continue
+            if (
+                str(local_repository.get("owner", "")) == owner
+                and str(local_repository.get("name", "")) == repo
+            ):
+                matching_local.append(candidate)
+        if len(matching_local) == 1:
+            workspace = workspace_state(matching_local[0]["root"])
+            local = local_plan(workspace["root"], mode=mode, age_path=age_path)
+        elif matching_local:
+            local["registered_instance_choices"] = [
+                value["root"] for value in matching_local
+            ]
+            if "select-local-knowledge-instance" not in local["confirmation_required"]:
+                local["confirmation_required"].append("select-local-knowledge-instance")
     confirmations = [*dependency_confirmations, *local["confirmation_required"]]
     confirmations.extend(repository_confirmations)
     if run_initial_sync:

@@ -348,8 +348,10 @@ class ProductizationAcceptanceTests(unittest.TestCase):
         self.assertIn("terminal_state: complete", local_skill)
         self.assertIn("不得自行追加 `doctor`", local_skill)
         self.assertIn("不安装到全局 Skill 目录", local_skill)
+        self.assertIn("用户未明确选择前禁止新建、连接或迁移", local_skill)
         self.assertIn("onboarding_complete: true", remote_skill)
         self.assertIn("terminal_state: complete", remote_skill)
+        self.assertIn("用户未明确选择前禁止新建、连接或迁移", remote_skill)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from kb_vault.adapters.github_contents import GitHubContentsAdapter  # noqa: E40
 from kb_vault.bootstrap import (  # noqa: E402
     KNOWLEDGE_MODULE_RELATIVE,
     initialize_instance,
+    initialize_personal_domain,
     resolve_knowledge_root,
 )
 from kb_vault.dependencies import LocalDependencyEnvironment  # noqa: E402
@@ -40,6 +41,7 @@ from kb_vault.github_onboarding import (  # noqa: E402
     GitHubCLIEnvironment,
     GitHubCLIRepositoryClient,
     GitHubRepositoryClient,
+    bind_repository,
     initial_git_sync,
     resolve_github_token,
 )
@@ -239,6 +241,140 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual("new-path", plan["workspace_state"])
         self.assertEqual([], plan["confirmation_required"])
 
+    def test_github_first_reuses_single_existing_child_instance(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "obsidian-vault"
+        workspace.mkdir()
+        (workspace / ".obsidian").mkdir()
+        existing = workspace / "17deg-atlas-knowledge"
+        initialize_personal_domain(existing)
+        bind_repository(
+            existing,
+            owner="example-user",
+            repo="17deg-atlas-knowledge",
+            branch="main",
+            visibility="private",
+            subject_id="person:github:example-user",
+        )
+        fake = self.FakeGitHub()
+        fake.repositories["example-user/17deg-atlas-knowledge"] = {
+            "owner": "example-user",
+            "name": "17deg-atlas-knowledge",
+            "private": True,
+            "default_branch": "main",
+            "html_url": "https://github.com/example-user/17deg-atlas-knowledge",
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"ATLAS_WORKSPACE": str(workspace), "KB_INSTANCE_ROOT": ""},
+            clear=False,
+        ):
+            plan = github_first_plan(runtime="local", client=fake, run_initial_sync=False)
+            result = github_first_setup(
+                runtime="local",
+                client=fake,
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+            )
+        self.assertEqual(str(existing.resolve()), plan["workspace"])
+        self.assertEqual("existing-instance", plan["workspace_state"])
+        self.assertEqual("connect-remembered-repository", plan["repository_action"])
+        self.assertEqual(str(existing.resolve()), result["workspace"])
+        self.assertFalse(result["repository_cloned"])
+        self.assertEqual([], fake.cloned)
+        self.assertFalse((workspace / "17deg-personal").exists())
+
+    def test_github_first_gates_duplicate_local_clones_of_one_repository(self) -> None:
+        workspace = self.base / "duplicate-workspace"
+        workspace.mkdir()
+        fake = self.FakeGitHub()
+        repository = {
+            "owner": "example-user",
+            "name": "shared-vault",
+            "private": True,
+            "default_branch": "main",
+            "html_url": "https://github.com/example-user/shared-vault",
+        }
+        fake.repositories["example-user/shared-vault"] = repository
+        fake.instances.add("example-user/shared-vault")
+        roots = []
+        for name in ("first-copy", "second-copy"):
+            root = workspace / name
+            initialize_personal_domain(root)
+            bind_repository(
+                root,
+                owner="example-user",
+                repo="shared-vault",
+                branch="main",
+                visibility="private",
+                subject_id="person:github:example-user",
+            )
+            roots.append(str(root.resolve()))
+        with mock.patch.dict(
+            os.environ,
+            {"ATLAS_WORKSPACE": str(workspace), "KB_INSTANCE_ROOT": ""},
+            clear=False,
+        ):
+            plan = github_first_plan(runtime="local", client=fake)
+        self.assertEqual(str(workspace.resolve()), plan["workspace"])
+        self.assertIn("select-local-knowledge-instance", plan["confirmation_required"])
+        self.assertNotIn(
+            "create-inside-nonempty-current-directory", plan["confirmation_required"]
+        )
+        self.assertEqual(
+            "select-existing-local-instance", plan["local_plan"]["action"]
+        )
+        self.assertIn("reuse-selected-instance", plan["local_plan"]["automatic_steps"])
+        self.assertNotIn(
+            "create-independent-instance", plan["local_plan"]["automatic_steps"]
+        )
+        self.assertEqual(roots, plan["local_plan"]["registered_instance_choices"])
+
+    def test_legacy_remote_layout_requires_choice_before_new_instance(self) -> None:
+        workspace = self.base / "legacy-choice-workspace"
+        workspace.mkdir()
+        fake = self.FakeGitHub()
+        repository = {
+            "owner": "example-user",
+            "name": "legacy-knowledge",
+            "private": True,
+            "default_branch": "main",
+            "html_url": "https://github.com/example-user/legacy-knowledge",
+            "instance": {
+                "domain_kind": "personal",
+                "subject_kind": "person",
+                "subject_id": "person:github:example-user",
+                "layout_kind": "domain-root",
+                "modules": [
+                    {
+                        "module_kind": "knowledge",
+                        "path": "domains/personal/knowledge",
+                    }
+                ],
+            },
+        }
+        fake.repositories["example-user/legacy-knowledge"] = repository
+        fake.instances.add("example-user/legacy-knowledge")
+        with mock.patch.dict(
+            os.environ,
+            {"ATLAS_WORKSPACE": str(workspace), "KB_INSTANCE_ROOT": ""},
+            clear=False,
+        ):
+            plan = github_first_plan(runtime="local", client=fake)
+        self.assertIsNone(plan["repository"])
+        self.assertEqual("select-legacy-or-current-instance", plan["repository_action"])
+        self.assertIn(
+            "select-legacy-or-current-instance", plan["confirmation_required"]
+        )
+        self.assertEqual("connect-legacy", plan["repository_options"][0]["choice"])
+        self.assertEqual("create-current", plan["repository_options"][1]["choice"])
+        self.assertTrue(plan["repository_options"][1]["recommended"])
+        self.assertTrue(
+            plan["repository_options"][1]["target"].endswith("17deg-personal")
+        )
+
     class FakeGitHub:
         def __init__(self) -> None:
             self.repositories: dict[str, dict[str, object]] = {}
@@ -367,6 +503,8 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertTrue(result["repository_created"])
         self.assertTrue(result["repository_private"])
         self.assertEqual("remote", result["runtime"])
+        self.assertTrue((root / "knowledge").is_dir())
+        self.assertFalse((root / "domains" / "personal" / "knowledge").exists())
         config = json.loads(
             (root / KNOWLEDGE_MODULE_RELATIVE / "config" / "projection.yml").read_text(encoding="utf-8")
         )
