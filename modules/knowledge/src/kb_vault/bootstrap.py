@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import KBError, KnowledgeVault
+from .io_utils import atomic_replace
 
 
 PERSONAL_DOMAIN_MANIFEST = Path("personal.yaml")
@@ -165,7 +166,7 @@ def ensure_instance_manifest(
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(path)
+    atomic_replace(temporary, path)
     return value
 
 
@@ -235,7 +236,7 @@ def ensure_personal_domain_manifest(
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(path)
+    atomic_replace(temporary, path)
     return value
 
 

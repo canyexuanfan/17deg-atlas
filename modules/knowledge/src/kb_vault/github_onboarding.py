@@ -24,6 +24,7 @@ from .bootstrap import (
     resolve_knowledge_root,
 )
 from .core import KBError
+from .io_utils import atomic_replace
 
 
 Transport = Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, Any]]
@@ -1125,7 +1126,7 @@ def bind_repository(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    manifest_temporary.replace(manifest_path)
+    atomic_replace(manifest_temporary, manifest_path)
     knowledge_root = resolve_knowledge_root(workspace)
     path = knowledge_root / "config" / "projection.yml"
     try:
@@ -1143,7 +1144,7 @@ def bind_repository(
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def bind_git_remote(workspace: Path, repository_url: str) -> bool:
@@ -1220,6 +1221,18 @@ def initial_git_sync(
             check=False,
         )
 
+    def align_to(remote_commit: str) -> None:
+        aligned = run(["reset", "--mixed", remote_commit])
+        if aligned.returncode != 0:
+            raise KBError("unable to align the workspace with the existing repository")
+        deleted = run(["diff", "--name-only", "--diff-filter=D", "-z"])
+        if deleted.returncode != 0:
+            raise KBError("unable to inspect remote-only baseline files")
+        for relative in (value for value in deleted.stdout.split("\0") if value):
+            restored = run(["checkout", remote_commit, "--", relative])
+            if restored.returncode != 0:
+                raise KBError("unable to preserve a remote-only baseline file")
+
     for key, value in (
         ("user.name", account),
         ("user.email", f"{account}@users.noreply.github.com"),
@@ -1227,6 +1240,30 @@ def initial_git_sync(
         configured = run(["config", "--local", key, value])
         if configured.returncode != 0:
             raise KBError("knowledge workspace Git identity setup failed")
+    remote_head = run(["ls-remote", "--exit-code", "origin", f"refs/heads/{branch}"])
+    if remote_head.returncode not in (0, 2):
+        raise KBError("unable to inspect the existing GitHub repository baseline")
+    if remote_head.returncode == 0:
+        fields = remote_head.stdout.strip().split()
+        if not fields:
+            raise KBError("existing GitHub repository baseline is invalid")
+        remote_commit = fields[0]
+        fetched = run(["fetch", "--no-tags", "origin", f"refs/heads/{branch}"])
+        if fetched.returncode != 0:
+            raise KBError("unable to fetch the existing GitHub repository baseline")
+        local_head = run(["rev-parse", "--verify", "HEAD"])
+        if local_head.returncode != 0:
+            align_to(remote_commit)
+        elif local_head.stdout.strip() != remote_commit:
+            remote_is_ancestor = run(["merge-base", "--is-ancestor", remote_commit, "HEAD"])
+            if remote_is_ancestor.returncode != 0:
+                local_is_ancestor = run(["merge-base", "--is-ancestor", "HEAD", remote_commit])
+                if local_is_ancestor.returncode == 0:
+                    align_to(remote_commit)
+                else:
+                    raise KBError(
+                        "local and remote Git histories differ; automatic unrelated-history merge is forbidden"
+                    )
     added = run(["add", "--all"])
     if added.returncode != 0:
         raise KBError("knowledge workspace staging failed")

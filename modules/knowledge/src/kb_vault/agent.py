@@ -116,6 +116,13 @@ def _request_id(action: str) -> str:
 
 def discover_identities(root: str | Path, *, include_test: bool = True) -> dict[str, Path]:
     root_path = Path(root).resolve()
+    identity_roots = [root_path]
+    try:
+        knowledge_root = resolve_knowledge_root(root_path)
+    except KBError:
+        knowledge_root = None
+    if knowledge_root is not None and knowledge_root not in identity_roots:
+        identity_roots.append(knowledge_root)
     found: dict[str, Path] = {}
     for tier, env_name in IDENTITY_ENVS.items():
         configured = os.environ.get(env_name, "").strip()
@@ -123,9 +130,17 @@ def discover_identities(root: str | Path, *, include_test: bool = True) -> dict[
         if candidate and candidate.is_file():
             found[tier] = candidate
             continue
-        test_identity = root_path / ".local" / "test-keys" / f"{tier}.identity"
-        if include_test and test_identity.is_file():
-            found[tier] = test_identity
+        if include_test:
+            test_identity = next(
+                (
+                    candidate / ".local" / "test-keys" / f"{tier}.identity"
+                    for candidate in identity_roots
+                    if (candidate / ".local" / "test-keys" / f"{tier}.identity").is_file()
+                ),
+                None,
+            )
+            if test_identity is not None:
+                found[tier] = test_identity
     return found
 
 
@@ -450,6 +465,51 @@ def github_bootstrap_plan(
     }
 
 
+def _github_plan_connection_issue(
+    *,
+    runtime: str,
+    workspace: Mapping[str, Any],
+    visibility: str,
+    local: Mapping[str, Any],
+    existing_materials: Mapping[str, Any],
+    dependency_installation: Mapping[str, Any],
+    dependency_confirmations: list[str],
+    error: KBError,
+) -> dict[str, Any]:
+    confirmations = list(dict.fromkeys([*dependency_confirmations, "authorize-github-account"]))
+    return {
+        "status": "needs-confirmation",
+        "flow": "agent-onboarding",
+        "runtime": runtime,
+        "tool_runtime": _tool_runtime_state(),
+        "domain_kind": "personal",
+        "module_kind": "knowledge",
+        "subject_id": None,
+        "workspace": workspace["root"],
+        "workspace_state": workspace["state"],
+        "repository": None,
+        "repository_action": "prepare-github-connection",
+        "repository_visibility": visibility,
+        "confirmation_required": confirmations,
+        "github": {
+            "installed": True,
+            "authenticated": False,
+            "confirmation_required": ["authorize-github-account"],
+            "connection_error": str(error),
+        },
+        "dependency_installation": {
+            "age": {
+                "required": bool(dependency_installation.get("required", False)),
+                "manager": str(dependency_installation.get("manager", "existing")),
+            }
+        },
+        "local_plan": dict(local),
+        "existing_materials": dict(existing_materials),
+        "onboarding_complete": False,
+        "terminal_state": "github-connection-needs-authorization",
+    }
+
+
 def _unique_default_repository(active: Any, owner: str) -> tuple[str, dict[str, Any] | None]:
     for index in range(1, 101):
         base = DEFAULT_PERSONAL_DOMAIN_REPOSITORY_NAME
@@ -661,10 +721,36 @@ def github_first_plan(
                 "existing_materials": existing_materials,
             }
         environment = cli_environment or GitHubCLIEnvironment()
-        active = environment.client()
+        try:
+            active = environment.client()
+        except KBError as exc:
+            return _github_plan_connection_issue(
+                runtime=resolved_runtime,
+                workspace=workspace,
+                visibility=visibility,
+                local=local,
+                existing_materials=existing_materials,
+                dependency_installation=dependency_installation,
+                dependency_confirmations=dependency_confirmations,
+                error=exc,
+            )
     else:
         active = _github_client(client, token=token)
-    account = active.account()
+    try:
+        account = active.account()
+    except KBError as exc:
+        if client is not None or token is not None:
+            raise
+        return _github_plan_connection_issue(
+            runtime=resolved_runtime,
+            workspace=workspace,
+            visibility=visibility,
+            local=local,
+            existing_materials=existing_materials,
+            dependency_installation=dependency_installation,
+            dependency_confirmations=dependency_confirmations,
+            error=exc,
+        )
     discovered_layout = "unknown"
     remembered = configured_repository(Path(workspace["root"]))
     if remembered:
@@ -690,15 +776,29 @@ def github_first_plan(
         ]
     else:
         discovered_method = getattr(active, "discover_instances", None)
-        discovered = (
-            discovered_method(
-                domain_kind="personal",
-                module_kind="knowledge",
-                subject_id=f"person:github:{account['login']}",
+        try:
+            discovered = (
+                discovered_method(
+                    domain_kind="personal",
+                    module_kind="knowledge",
+                    subject_id=f"person:github:{account['login']}",
+                )
+                if callable(discovered_method)
+                else []
             )
-            if callable(discovered_method)
-            else []
-        )
+        except KBError as exc:
+            if client is not None or token is not None:
+                raise
+            return _github_plan_connection_issue(
+                runtime=resolved_runtime,
+                workspace=workspace,
+                visibility=visibility,
+                local=local,
+                existing_materials=existing_materials,
+                dependency_installation=dependency_installation,
+                dependency_confirmations=dependency_confirmations,
+                error=exc,
+            )
         if len(discovered) > 1:
             confirmations = [*dependency_confirmations, *local["confirmation_required"]]
             confirmations.append("select-knowledge-repository")
@@ -971,12 +1071,12 @@ def github_first_setup(
                 raise KBError("choose a GitHub repository name before importing existing materials")
             if not confirm_existing_materials_import:
                 raise KBError("existing material import requires explicit confirmation")
-            resolved_age = _preflight(resolved_dependency_age, require_git=initialize_git)
+            resolved_age = _preflight(resolved_dependency_age, require_git=False)
             local = local_setup(
                 preliminary_workspace["root"],
                 mode=mode,
                 age_path=resolved_age,
-                initialize_git=initialize_git,
+                initialize_git=False,
                 run_self_test=run_self_test,
                 confirm_production_key_use=confirm_production_key_use,
                 confirm_nonempty_directory=confirm_nonempty_directory,
@@ -1068,12 +1168,12 @@ def github_first_setup(
                 raise KBError("existing material review requires the local Atlas entry")
             if not confirm_existing_materials_import:
                 raise KBError("existing material import requires explicit confirmation")
-            resolved_age = _preflight(resolved_dependency_age, require_git=initialize_git)
+            resolved_age = _preflight(resolved_dependency_age, require_git=False)
             local = local_setup(
                 plan["workspace"],
                 mode=mode,
                 age_path=resolved_age,
-                initialize_git=initialize_git,
+                initialize_git=False,
                 run_self_test=run_self_test,
                 confirm_production_key_use=confirm_production_key_use,
                 confirm_nonempty_directory=confirm_nonempty_directory,

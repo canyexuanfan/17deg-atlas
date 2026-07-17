@@ -38,6 +38,15 @@ def find_product_root() -> Path | None:
             workspace / ".17deg-atlas" / "tool",
         ]
     )
+    for parent in (workspace, *workspace.parents):
+        candidates.extend(
+            [
+                parent / ".17deg-atlas" / "tool",
+                parent / ".codex" / "reference" / "17deg-atlas",
+                parent / ".claudian" / "reference" / "17deg-atlas",
+                parent / ".agents" / "reference" / "17deg-atlas",
+            ]
+        )
     if configured_home := os.environ.get("ATLAS_TOOL_HOME"):
         candidates.append(Path(configured_home))
     seen: set[Path] = set()

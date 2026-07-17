@@ -30,10 +30,12 @@ from kb_vault.bootstrap import (  # noqa: E402
 from kb_vault.dependencies import LocalDependencyEnvironment  # noqa: E402
 from kb_vault.agent import (  # noqa: E402
     detect_agent_runtime,
+    discover_identities,
     github_first_plan,
     github_first_setup,
     local_plan,
     local_setup,
+    resolve_workspace,
     save,
     workspace_state,
 )
@@ -46,7 +48,13 @@ from kb_vault.github_onboarding import (  # noqa: E402
     initial_git_sync,
     resolve_github_token,
 )
-from kb_vault.migration import import_workspace_candidate, migration_repair_plan  # noqa: E402
+from kb_vault.io_utils import atomic_replace  # noqa: E402
+from kb_vault.migration import (  # noqa: E402
+    confirm_workspace_candidates,
+    import_workspace_candidate,
+    migration_repair_plan,
+    workspace_completion_audit,
+)
 
 
 def load_remote():
@@ -66,6 +74,26 @@ class LocalAgentExperienceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.context.cleanup()
+
+    def test_atomic_replace_retries_one_windows_sharing_violation(self) -> None:
+        source = self.base / "manifest.tmp"
+        destination = self.base / "manifest.json"
+        source.write_text("new\n", encoding="utf-8")
+        destination.write_text("old\n", encoding="utf-8")
+        real_replace = os.replace
+        calls = 0
+
+        def flaky_replace(left, right):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError(5, "simulated sharing violation")
+            return real_replace(left, right)
+
+        with mock.patch("kb_vault.io_utils.os.replace", side_effect=flaky_replace):
+            atomic_replace(source, destination)
+        self.assertEqual(2, calls)
+        self.assertEqual("new\n", destination.read_text(encoding="utf-8"))
 
     def test_runtime_auto_requires_an_explicit_entry_or_remote_marker(self) -> None:
         cleared = {
@@ -91,6 +119,35 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual("blocked", result["status"])
         self.assertEqual("runtime-update-unverified", result["terminal_state"])
         self.assertFalse(result["onboarding_complete"])
+
+    def test_workspace_registry_and_nested_runtime_discover_one_instance_and_test_identities(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "obsidian-workspace"
+        workspace.mkdir()
+        instance = workspace / "alice-personal"
+        with mock.patch.dict(
+            os.environ,
+            {"ATLAS_WORKSPACE": str(workspace), "KB_INSTANCE_ROOT": ""},
+            clear=False,
+        ):
+            setup = local_setup(
+                instance,
+                mode="test",
+                age_path=self.age,
+                initialize_git=False,
+                run_self_test=False,
+            )
+            self.assertEqual(instance.resolve(), resolve_workspace())
+            discovered = discover_identities(instance)
+        self.assertEqual({"basic", "advanced", "core"}, set(discovered))
+        knowledge_root = Path(setup["knowledge_root"])
+        self.assertTrue(
+            all(
+                path.parent == knowledge_root / ".local" / "test-keys"
+                for path in discovered.values()
+            )
+        )
 
     def test_u01_u02_u04_u05_plan_gate_and_no_internal_ids(self) -> None:
         plan = local_plan(self.base / "vault", mode="test")
@@ -436,18 +493,31 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 existing_materials_action="import-review",
                 confirm_existing_materials_import=True,
             )
-            absorbed = import_workspace_candidate(
+            confirmed = confirm_workspace_candidates(
                 target,
-                source_path="questions/rough-note.md",
+                source_paths=["questions/rough-note.md"],
                 access="basic",
                 rights="owned",
                 origin_kind="self",
                 authorship_status="self_authored",
                 intended_role="knowledge",
-                summary="This note records a reusable test insight.",
+                wiki_compilation="compile",
+                confirm_semantic_decision=True,
+            )
+            absorbed = import_workspace_candidate(
+                target,
+                source_path="questions/rough-note.md",
+                confirmation_id=confirmed["receipts"][0]["confirmation_id"],
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="knowledge",
+                summary="A rough note that must be preserved exactly.",
                 card_question="What does the rough note preserve?",
                 card_answer="It preserves the original material and its traceability.",
                 topic_names=["Knowledge migration"],
+                evidence_quotes=["A rough note that must be preserved exactly."],
                 age_path=self.age,
             )
         self.assertEqual("needs-semantic-review", staged["terminal_state"])
@@ -488,18 +558,31 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 existing_materials_action="import-review",
                 confirm_existing_materials_import=True,
             )
-            import_workspace_candidate(
+            confirmed = confirm_workspace_candidates(
                 target,
-                source_path="questions/first.md",
+                source_paths=["questions/first.md"],
                 access="basic",
                 rights="owned",
                 origin_kind="self",
                 authorship_status="self_authored",
                 intended_role="knowledge",
-                summary="The first stable note.",
+                wiki_compilation="compile",
+                confirm_semantic_decision=True,
+            )
+            import_workspace_candidate(
+                target,
+                source_path="questions/first.md",
+                confirmation_id=confirmed["receipts"][0]["confirmation_id"],
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="knowledge",
+                summary="First stable note.",
                 card_question="Which note is stable?",
                 card_answer="The first note is stable.",
                 topic_names=["Incremental import"],
+                evidence_quotes=["First stable note."],
                 age_path=self.age,
             )
             second = questions / "second.md"
@@ -541,6 +624,101 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual("completed", by_path["questions/first.md"]["status"])
         self.assertEqual("pending", by_path["questions/second.md"]["status"])
 
+    def test_workspace_import_is_bound_to_confirmation_evidence_and_live_source(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "confirmed-workspace"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        original = questions / "grounded.md"
+        first_evidence = "The retry guard prevents the same failed command from running twice."
+        second_evidence = "The successful recovery verifies both the object and its source hash."
+        source_content = (
+            f"{first_evidence}\n\n{second_evidence}\n\n"
+            "This additional explanation makes the source long enough to require two independent excerpts.\n"
+        )
+        original.write_text(source_content, encoding="utf-8")
+        target = workspace / "alice-space"
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            github_first_setup(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+                existing_materials_action="import-review",
+                confirm_existing_materials_import=True,
+            )
+            confirmed = confirm_workspace_candidates(
+                target,
+                source_paths=["questions/grounded.md"],
+                access="core",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="ai_assisted",
+                intended_role="knowledge",
+                wiki_compilation="compile",
+                confirm_semantic_decision=True,
+            )
+            receipt = confirmed["receipts"][0]["confirmation_id"]
+            common = {
+                "target": target,
+                "source_path": "questions/grounded.md",
+                "confirmation_id": receipt,
+                "access": "core",
+                "rights": "owned",
+                "origin_kind": "self",
+                "authorship_status": "ai_assisted",
+                "intended_role": "knowledge",
+                "summary": f"{first_evidence} {second_evidence}",
+                "card_question": "How is a recovery grounded?",
+                "card_answer": f"{first_evidence} {second_evidence}",
+                "topic_names": ["Recovery"],
+                "evidence_quotes": [first_evidence, second_evidence],
+                "age_path": self.age,
+            }
+            with self.assertRaisesRegex(KBError, "differ from the confirmed decision"):
+                import_workspace_candidate(**{**common, "rights": "restricted"})
+            with self.assertRaisesRegex(KBError, "grounded source excerpt"):
+                import_workspace_candidate(
+                    **{
+                        **common,
+                        "summary": "Generic troubleshooting template.",
+                        "card_answer": "Generic answer.",
+                        "evidence_quotes": [],
+                    }
+                )
+            original.write_text(source_content + "changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(KBError, "source changed after staging"):
+                import_workspace_candidate(**common)
+            original.write_text(source_content, encoding="utf-8")
+            imported = import_workspace_candidate(**common)
+        self.assertEqual("ready-for-initial-sync", imported["terminal_state"])
+        state = json.loads(
+            (target / ".atlas" / "state" / "knowledge-migration.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        candidate = state["semantic_candidates"][0]
+        self.assertEqual("core", candidate["access"])
+        self.assertEqual("owned", candidate["rights"])
+        self.assertEqual("self", candidate["origin_kind"])
+        self.assertEqual("ai_assisted", candidate["authorship_status"])
+        self.assertEqual("knowledge", candidate["intended_role"])
+        self.assertEqual(receipt, candidate["confirmation_id"])
+        self.assertEqual(2, len(candidate["semantic_evidence"]))
+        audit_before_change = workspace_completion_audit(target)
+        self.assertNotIn("source-materials-changed-after-review", audit_before_change["issues"])
+        (questions / "late-note.md").write_text("A late source change.\n", encoding="utf-8")
+        audit_after_change = workspace_completion_audit(target)
+        self.assertIn("source-materials-changed-after-review", audit_after_change["issues"])
+        self.assertEqual(1, audit_after_change["new_or_changed_source_count"])
+        self.assertEqual(
+            ["questions/late-note.md"], audit_after_change["new_or_changed_source_paths"]
+        )
+
     def test_nonknowledge_workspace_material_is_routed_without_empty_module(self) -> None:
         if not self.age:
             self.skipTest("set KB_TEST_AGE or install age")
@@ -562,9 +740,21 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 existing_materials_action="import-review",
                 confirm_existing_materials_import=True,
             )
+            confirmed = confirm_workspace_candidates(
+                target,
+                source_paths=["drafts/article.md"],
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="creation",
+                wiki_compilation="route",
+                confirm_semantic_decision=True,
+            )
             routed = import_workspace_candidate(
                 target,
                 source_path="drafts/article.md",
+                confirmation_id=confirmed["receipts"][0]["confirmation_id"],
                 access="basic",
                 rights="owned",
                 origin_kind="self",
@@ -1643,6 +1833,57 @@ class LocalAgentExperienceTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, head.returncode)
+
+    def test_initial_sync_layers_new_workspace_on_existing_remote_baseline(self) -> None:
+        remote = self.base / "existing-baseline.git"
+        seed = self.base / "existing-baseline-seed"
+        root = self.base / "existing-baseline-workspace"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "clone", str(remote), str(seed)], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "seed"], cwd=seed, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "seed@example.invalid"],
+            cwd=seed,
+            check=True,
+            capture_output=True,
+        )
+        (seed / "REMOTE.md").write_text("remote baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "REMOTE.md"], cwd=seed, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "baseline"], cwd=seed, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "push", "origin", "HEAD:main"], cwd=seed, check=True, capture_output=True
+        )
+        root.mkdir()
+        subprocess.run(
+            ["git", "init", "--initial-branch=main"], cwd=root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(remote)],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        (root / "LOCAL.md").write_text("local workspace\n", encoding="utf-8")
+        result = initial_git_sync(root, account="example-user")
+        self.assertTrue(result["committed"])
+        self.assertTrue(result["pushed"])
+        self.assertEqual("remote baseline\n", (root / "REMOTE.md").read_text(encoding="utf-8"))
+        self.assertEqual("local workspace\n", (root / "LOCAL.md").read_text(encoding="utf-8"))
+        parents = subprocess.run(
+            ["git", "rev-list", "--parents", "-1", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.split()
+        self.assertEqual(2, len(parents))
 
 
 class RemoteAgentExperienceTests(unittest.TestCase):

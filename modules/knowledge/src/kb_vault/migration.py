@@ -21,6 +21,7 @@ from .bootstrap import (
     resolve_knowledge_root,
 )
 from .core import KBError, KnowledgeVault, stable_token
+from .io_utils import atomic_replace
 from .github_onboarding import GitHubCLIEnvironment, configured_repository
 from .workspace_views import materialize_workspace_views
 
@@ -136,7 +137,7 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         json.dumps(dict(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -962,7 +963,7 @@ def _copy_atomic(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".migration-tmp")
     shutil.copy2(source, temporary)
-    temporary.replace(destination)
+    atomic_replace(temporary, destination)
 
 
 def _test_identities(knowledge_root: Path) -> dict[str, Path]:
@@ -1170,6 +1171,9 @@ def record_migration_candidate(
     wiki_object_ids: list[str] | tuple[str, ...] = (),
     identities: Mapping[str, str | Path] | None = None,
     confirm_raw_only: bool = False,
+    confirmation_id: str = "",
+    responsibility: Mapping[str, str] | None = None,
+    evidence_quotes: Iterable[str] = (),
     age_path: str | Path | None = None,
 ) -> dict[str, Any]:
     target_root = Path(target).expanduser().resolve()
@@ -1234,6 +1238,20 @@ def record_migration_candidate(
             "raw_only": bool(confirm_raw_only),
         }
     )
+    if confirmation_id:
+        selected["confirmation_id"] = confirmation_id
+    if responsibility:
+        selected.update({key: str(value) for key, value in responsibility.items()})
+        selected["clarification_status"] = "answered"
+    retained_evidence = [value for value in evidence_quotes if value]
+    if retained_evidence:
+        selected["semantic_evidence"] = [
+            {
+                "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+                "characters": len(value),
+            }
+            for value in retained_evidence
+        ]
     finished_statuses = {"completed", "routed"}
     pending = [
         item
@@ -1290,29 +1308,14 @@ def record_migration_candidate(
     }
 
 
-def import_workspace_candidate(
-    target: str | Path,
+def _validate_workspace_responsibility(
     *,
-    source_path: str,
     access: str,
     rights: str,
     origin_kind: str,
     authorship_status: str,
     intended_role: str,
-    title: str = "",
-    summary: str = "",
-    card_question: str = "",
-    card_answer: str = "",
-    card_kind: str = "concept",
-    topic_names: Iterable[str] = (),
-    raw_only: bool = False,
-    confirm_raw_only: bool = False,
-    confirm_route_outside_knowledge: bool = False,
-    identities: Mapping[str, str | Path] | None = None,
-    recipients: Mapping[str, str] | None = None,
-    age_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Atomically absorb one staged workspace file into Raw and candidate Wiki objects."""
+) -> None:
     if access not in ("public", "basic", "advanced", "core"):
         raise KBError("workspace candidate access must be public, basic, advanced, or core")
     if rights not in ("owned", "licensed", "restricted", "unknown"):
@@ -1345,6 +1348,164 @@ def import_workspace_candidate(
         raise KBError("workspace candidate intended role is invalid")
     if "unknown" in (origin_kind, authorship_status, intended_role) or rights == "unknown":
         raise KBError("workspace candidate responsibility fields require user clarification")
+
+
+def confirm_workspace_candidates(
+    target: str | Path,
+    *,
+    source_paths: Iterable[str],
+    access: str,
+    rights: str,
+    origin_kind: str,
+    authorship_status: str,
+    intended_role: str,
+    wiki_compilation: str,
+    confirm_semantic_decision: bool = False,
+) -> dict[str, Any]:
+    """Bind the user's exact batch decision to staged file hashes before import."""
+    if not confirm_semantic_decision:
+        raise KBError("workspace semantic decision requires explicit confirmation")
+    _validate_workspace_responsibility(
+        access=access,
+        rights=rights,
+        origin_kind=origin_kind,
+        authorship_status=authorship_status,
+        intended_role=intended_role,
+    )
+    if wiki_compilation not in ("compile", "raw-only", "route"):
+        raise KBError("workspace candidate Wiki compilation choice is invalid")
+    knowledge_candidate = intended_role in ("knowledge", "evidence")
+    if knowledge_candidate and wiki_compilation == "route":
+        raise KBError("knowledge candidates cannot use an outside-knowledge route receipt")
+    if not knowledge_candidate and wiki_compilation != "route":
+        raise KBError("non-knowledge candidates require an outside-knowledge route receipt")
+    target_root = Path(target).expanduser().resolve()
+    state_path = target_root / MIGRATION_STATE
+    state = _read_json(state_path)
+    candidates = state.get("semantic_candidates") if isinstance(state, Mapping) else None
+    if not isinstance(candidates, list):
+        raise KBError("workspace semantic candidate list is unavailable")
+    requested = sorted({value.strip() for value in source_paths if value.strip()}, key=str.casefold)
+    if not requested:
+        raise KBError("workspace semantic confirmation requires at least one source path")
+    by_path = {
+        str(item.get("path")): item
+        for item in candidates
+        if isinstance(item, dict) and item.get("path")
+    }
+    missing = [value for value in requested if value not in by_path]
+    if missing:
+        raise KBError("workspace semantic confirmation references an unknown candidate")
+    fields = {
+        "access": access,
+        "rights": rights,
+        "origin_kind": origin_kind,
+        "authorship_status": authorship_status,
+        "intended_role": intended_role,
+        "wiki_compilation": wiki_compilation,
+    }
+    seed = json.dumps(
+        {
+            "source_fingerprint": state.get("source_fingerprint", ""),
+            "files": [
+                {"path": value, "sha256": by_path[value].get("sha256", "")}
+                for value in requested
+            ],
+            "fields": fields,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    batch_id = stable_token("confirm", seed)
+    receipts: list[dict[str, str]] = []
+    for value in requested:
+        selected = by_path[value]
+        if selected.get("status") in ("completed", "routed"):
+            raise KBError("completed workspace candidates cannot be silently reconfirmed")
+        confirmation_id = stable_token(
+            "confirm-item", f"{batch_id}:{value}:{selected.get('sha256', '')}"
+        )
+        selected["confirmation"] = {
+            "confirmation_id": confirmation_id,
+            "batch_confirmation_id": batch_id,
+            "source_sha256": selected.get("sha256", ""),
+            "fields": fields,
+            "confirmed_at": _utc_now(),
+        }
+        selected["clarification_status"] = "answered"
+        receipts.append({"source_path": value, "confirmation_id": confirmation_id})
+    _atomic_json(state_path, state)
+    return {
+        "status": "ok",
+        "flow": "knowledge-workspace-semantic-confirmation",
+        "batch_confirmation_id": batch_id,
+        "confirmed_count": len(receipts),
+        "confirmed_fields": fields,
+        "receipts": receipts,
+        "next_action": "import-review",
+    }
+
+
+def _normalized_excerpt(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _validate_semantic_evidence(
+    *, content: str, summary: str, card_question: str, card_answer: str, evidence_quotes: Iterable[str]
+) -> list[str]:
+    source = _normalized_excerpt(content)
+    generated = _normalized_excerpt("\n".join((summary, card_question, card_answer)))
+    retained: list[str] = []
+    for raw in evidence_quotes:
+        excerpt = _normalized_excerpt(raw)
+        if not excerpt or excerpt in retained:
+            continue
+        if len(excerpt) < 12:
+            raise KBError("workspace semantic evidence excerpts must contain at least 12 characters")
+        if excerpt not in source:
+            raise KBError("workspace semantic evidence is not present in the staged source")
+        if excerpt not in generated:
+            raise KBError("workspace Wiki text must quote every supplied source evidence excerpt")
+        retained.append(excerpt)
+    required = 2 if len(source) >= 120 else 1
+    if len(retained) < required:
+        raise KBError(f"workspace Wiki import requires at least {required} grounded source excerpt(s)")
+    return retained
+
+
+def import_workspace_candidate(
+    target: str | Path,
+    *,
+    source_path: str,
+    confirmation_id: str,
+    access: str,
+    rights: str,
+    origin_kind: str,
+    authorship_status: str,
+    intended_role: str,
+    title: str = "",
+    summary: str = "",
+    card_question: str = "",
+    card_answer: str = "",
+    card_kind: str = "concept",
+    topic_names: Iterable[str] = (),
+    evidence_quotes: Iterable[str] = (),
+    raw_only: bool = False,
+    confirm_raw_only: bool = False,
+    confirm_route_outside_knowledge: bool = False,
+    identities: Mapping[str, str | Path] | None = None,
+    recipients: Mapping[str, str] | None = None,
+    age_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Atomically absorb one staged workspace file into Raw and candidate Wiki objects."""
+    _validate_workspace_responsibility(
+        access=access,
+        rights=rights,
+        origin_kind=origin_kind,
+        authorship_status=authorship_status,
+        intended_role=intended_role,
+    )
     topics = [value.strip() for value in topic_names if value.strip()]
     knowledge_candidate = intended_role in ("knowledge", "evidence")
     if knowledge_candidate and raw_only and not confirm_raw_only:
@@ -1365,6 +1526,24 @@ def import_workspace_candidate(
     )
     if selected is None:
         raise KBError("workspace candidate does not exist")
+    confirmation = selected.get("confirmation")
+    if not isinstance(confirmation, Mapping) or confirmation.get("confirmation_id") != confirmation_id:
+        raise KBError("workspace candidate import requires its exact confirmation receipt")
+    expected_fields = confirmation.get("fields")
+    actual_fields = {
+        "access": access,
+        "rights": rights,
+        "origin_kind": origin_kind,
+        "authorship_status": authorship_status,
+        "intended_role": intended_role,
+        "wiki_compilation": (
+            "route" if not knowledge_candidate else "raw-only" if raw_only else "compile"
+        ),
+    }
+    if not isinstance(expected_fields, Mapping) or dict(expected_fields) != actual_fields:
+        raise KBError("workspace candidate import fields differ from the confirmed decision")
+    if confirmation.get("source_sha256") != selected.get("sha256"):
+        raise KBError("workspace candidate confirmation is stale")
     staged = target_root / str(selected.get("staged_path", ""))
     if not staged.is_file() or _sha256(staged) != selected.get("sha256"):
         raise KBError("workspace candidate source verification failed")
@@ -1372,6 +1551,19 @@ def import_workspace_candidate(
         content = staged.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise KBError("workspace candidate requires text extraction before import") from exc
+    source_root = Path(str(state.get("source", ""))).expanduser().resolve()
+    live_source = source_root / Path(source_path)
+    if not live_source.is_file() or _sha256(live_source) != selected.get("sha256"):
+        raise KBError("workspace candidate source changed after staging; review the new version")
+    grounded_evidence: list[str] = []
+    if knowledge_candidate and not raw_only:
+        grounded_evidence = _validate_semantic_evidence(
+            content=content,
+            summary=summary,
+            card_question=card_question,
+            card_answer=card_answer,
+            evidence_quotes=evidence_quotes,
+        )
 
     knowledge_root = resolve_knowledge_root(target_root)
     effective_identities = dict(identities or {})
@@ -1418,6 +1610,7 @@ def import_workspace_candidate(
                 "intended_role": intended_role,
                 "rights": rights,
                 "access": access,
+                "confirmation_id": confirmation_id,
                 "completed_at": _utc_now(),
             }
         )
@@ -1518,6 +1711,15 @@ def import_workspace_candidate(
         wiki_object_ids=wiki_ids,
         identities=effective_identities,
         confirm_raw_only=raw_only,
+        confirmation_id=confirmation_id,
+        responsibility={
+            "origin_kind": origin_kind,
+            "authorship_status": authorship_status,
+            "intended_role": intended_role,
+            "rights": rights,
+            "access": access,
+        },
+        evidence_quotes=grounded_evidence,
         age_path=age_path,
     )
     return {
@@ -1537,6 +1739,89 @@ def _migration_state(target: Path) -> dict[str, Any]:
     if migration_repair_plan(target)["repair_required"]:
         raise KBError("target migration requires repair before source retirement")
     return state
+
+
+def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
+    """Prove that semantic review is current immediately before a completion report."""
+    target_root = Path(target).expanduser().resolve()
+    state = _read_json(target_root / MIGRATION_STATE)
+    if not isinstance(state, Mapping) or state.get("source_kind") != "workspace-materials":
+        raise KBError("workspace completion audit requires a workspace-material migration state")
+    candidates = state.get("semantic_candidates")
+    if not isinstance(candidates, list):
+        raise KBError("workspace completion audit cannot read semantic candidates")
+    pending = [
+        str(item.get("path"))
+        for item in candidates
+        if isinstance(item, Mapping) and item.get("status") not in ("completed", "routed")
+    ]
+    source_root = Path(str(state.get("source", ""))).expanduser().resolve()
+    live_plan = workspace_materials_plan(source_root, target_root)
+    residuals: list[str] = []
+    for agent_root in (".codex", ".claudian", ".agents"):
+        reference = source_root / agent_root / "reference"
+        if not reference.is_dir():
+            continue
+        residuals.extend(
+            str(path)
+            for path in reference.glob("17deg-atlas.residual-*")
+            if path.exists()
+        )
+    git_clean = True
+    git_synced = False
+    local_commit = ""
+    upstream_commit = ""
+    if (target_root / ".git").is_dir() and shutil.which("git"):
+        status = _git(target_root, "status", "--porcelain")
+        git_clean = status.returncode == 0 and not status.stdout.strip()
+        local = _git(target_root, "rev-parse", "HEAD")
+        upstream = _git(target_root, "rev-parse", "@{upstream}")
+        local_commit = local.stdout.decode("utf-8", errors="replace").strip() if local.returncode == 0 else ""
+        upstream_commit = (
+            upstream.stdout.decode("utf-8", errors="replace").strip()
+            if upstream.returncode == 0
+            else ""
+        )
+        git_synced = bool(local_commit and local_commit == upstream_commit)
+    issues: list[str] = []
+    if state.get("status") != "verified":
+        issues.append("migration-state-not-verified")
+    if pending:
+        issues.append("semantic-candidates-pending")
+    if live_plan["candidate_count"]:
+        issues.append("source-materials-changed-after-review")
+    if residuals:
+        issues.append("runtime-install-residuals-remain")
+    if not git_clean:
+        issues.append("workspace-git-is-dirty")
+    if not git_synced:
+        issues.append("workspace-is-not-synced-to-upstream")
+    audit_seed = json.dumps(
+        {
+            "source_fingerprint": live_plan["fingerprint"],
+            "local_commit": local_commit,
+            "upstream_commit": upstream_commit,
+            "pending": pending,
+            "issues": issues,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "status": "ok" if not issues else "blocked",
+        "flow": "knowledge-workspace-completion-audit",
+        "terminal_state": "complete" if not issues else "needs-action",
+        "completion_audit_id": stable_token("completion", audit_seed),
+        "issues": issues,
+        "pending_count": len(pending),
+        "new_or_changed_source_count": live_plan["candidate_count"],
+        "new_or_changed_source_paths": live_plan["sample_paths"],
+        "install_residuals": residuals,
+        "git_clean": git_clean,
+        "git_synced": git_synced,
+        "local_commit": local_commit,
+        "upstream_commit": upstream_commit,
+    }
 
 
 def _record_retirement(target: Path, details: Mapping[str, Any]) -> None:

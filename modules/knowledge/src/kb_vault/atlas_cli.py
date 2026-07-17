@@ -19,6 +19,8 @@ WORKSPACE_ACTIONS = {
     "migration-start": "agent-migration-start",
     "migration-review": "agent-migration-review",
     "import-review": "agent-workspace-import",
+    "confirm-review": "agent-workspace-confirm",
+    "completion-audit": "agent-workspace-completion-audit",
     "migration-repair-plan": "agent-migration-repair-plan",
     "migration-repair-start": "agent-migration-repair-start",
     "retirement-plan": "agent-retirement-plan",

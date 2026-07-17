@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .core import KBError, PRIVATE_TIERS, KnowledgeVault, canonical_json, sha256_text, utc_now
+from .core import KBError, KnowledgeVault, canonical_json, sha256_text, utc_now
 from .cycle import KnowledgeCycle
 
 

@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from .core import KBError
 from .bootstrap import is_knowledge_module_root, is_personal_domain_root, resolve_knowledge_root
+from .io_utils import atomic_replace
 
 
 REGISTRY_RELATIVE = Path(".17deg-atlas") / "state" / "instances.json"
@@ -108,5 +109,5 @@ def register_instance(
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(path)
+    atomic_replace(temporary, path)
     return True

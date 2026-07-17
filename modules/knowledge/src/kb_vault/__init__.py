@@ -7,6 +7,7 @@ from .curator import KnowledgeCurator
 from .cycle import KnowledgeCycle
 from .retrieval import TrustedRetrieval
 from .migration import (
+    confirm_workspace_candidates,
     import_workspace_candidate,
     migrate_instance,
     migration_plan,
@@ -18,6 +19,7 @@ from .migration import (
     retire_source,
     stage_workspace_materials,
     workspace_materials_plan,
+    workspace_completion_audit,
 )
 from .capability import KnowledgeCapabilities
 from .model import (
@@ -44,6 +46,7 @@ __all__ = [
     "KnowledgeCapabilities",
     "TrustedRetrieval",
     "import_workspace_candidate",
+    "confirm_workspace_candidates",
     "migration_plan",
     "migration_repair_plan",
     "migrate_instance",
@@ -54,6 +57,7 @@ __all__ = [
     "retire_source",
     "stage_workspace_materials",
     "workspace_materials_plan",
+    "workspace_completion_audit",
     "PublicAtlas",
     "classification_level_for_tier",
     "compatibility_tier_for",

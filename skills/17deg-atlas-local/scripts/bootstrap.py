@@ -189,6 +189,22 @@ def ensure_local_exclude(workspace: Path) -> bool:
     return True
 
 
+def cleanup_install_residuals(workspace: Path) -> list[str]:
+    """Remove only Atlas installer leftovers from Agent reference directories."""
+    remaining: list[str] = []
+    for agent_root in (".codex", ".claudian", ".agents"):
+        reference = workspace / agent_root / "reference"
+        if not reference.is_dir():
+            continue
+        for candidate in reference.glob("17deg-atlas.residual-*"):
+            if not candidate.is_dir() or candidate.parent.resolve() != reference.resolve():
+                continue
+            shutil.rmtree(candidate, ignore_errors=True)
+            if candidate.exists():
+                remaining.append(str(candidate))
+    return remaining
+
+
 def install_cli(
     install_root: Path,
     tool_root: Path,
@@ -369,6 +385,7 @@ def bootstrap(
                 shutil.rmtree(target, ignore_errors=True)
                 backup.replace(target)
             raise
+        install_residuals = cleanup_install_residuals(workspace)
         result = {
             "status": "ok",
             "action": action,
@@ -379,6 +396,7 @@ def bootstrap(
             "update_check": "updated" if action == "updated-from-public-repository" else update_check,
             "source_commit": metadata.get("source_commit", ""),
             "local_exclude_configured": ensure_local_exclude(workspace),
+            "install_residuals": install_residuals,
             **cli,
         }
         if staged_source.exists():
@@ -415,6 +433,7 @@ def bootstrap(
     if LAST_UPDATE_ERROR:
         metadata["update_error"] = LAST_UPDATE_ERROR
     cli = install_cli(install_root, target, metadata=metadata)
+    install_residuals = cleanup_install_residuals(workspace)
     result = {
         "status": "ok",
         "action": action,
@@ -429,6 +448,7 @@ def bootstrap(
         "global_skill_installed": False,
         "local_exclude_recommended": ".17deg-atlas/",
         "local_exclude_configured": ensure_local_exclude(workspace),
+        "install_residuals": install_residuals,
         **cli,
     }
     if staged_source.exists():

@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
-import sys
 
 sys.path.insert(0, str(MODULE_ROOT / "src"))
 

@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from .core import KBError, KnowledgeVault, canonical_json, sha256_text, stable_token
 from .cycle import KnowledgeCycle, _event_payload
-from .model import CLASSIFICATION_RANK, highest_classification_level
+from .model import highest_classification_level
 
 
 CAPABILITY_REVIEW_DECISIONS = ("reviewed", "verified", "rejected", "needs-evidence")

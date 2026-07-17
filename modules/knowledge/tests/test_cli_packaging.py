@@ -270,6 +270,27 @@ class CLIPackagingAcceptanceTests(unittest.TestCase):
             self.assertEqual(before["source_commit"], after["source_commit"])
             self.assertEqual("unavailable", after["update_check"])
 
+    def test_successful_bootstrap_removes_only_atlas_reference_residuals(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "cleanup-workspace"
+            residual = workspace / ".codex" / "reference" / "17deg-atlas.residual-20260717"
+            unrelated = workspace / ".codex" / "reference" / "another-tool.residual-20260717"
+            residual.mkdir(parents=True)
+            unrelated.mkdir(parents=True)
+            (residual / "marker.txt").write_text("remove\n", encoding="utf-8")
+            installed = self.run_python(
+                LOCAL_SCRIPTS / "bootstrap.py",
+                "--workspace",
+                str(workspace),
+                "--source",
+                str(REPOSITORY_ROOT),
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            result = json.loads(installed.stdout)
+            self.assertEqual([], result["install_residuals"])
+            self.assertFalse(residual.exists())
+            self.assertTrue(unrelated.is_dir())
+
     def test_local_and_remote_skills_call_one_cli_with_fixed_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary) / "role-workspace"

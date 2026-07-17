@@ -21,16 +21,19 @@ from kb_vault import (  # noqa: E402
 )
 from kb_vault.bootstrap import initialize_personal_domain, resolve_knowledge_root  # noqa: E402
 from kb_vault.agent import (  # noqa: E402
+    discover_identities,
     github_first_plan,
     github_first_setup,
     local_plan,
     local_setup,
     save as agent_save,
     search as agent_search,
+    resolve_workspace,
 )
 from kb_vault.adapters.github_contents import GitHubContentsAdapter  # noqa: E402
 from kb_vault.hermes import handle_hermes_request  # noqa: E402
 from kb_vault.migration import (  # noqa: E402
+    confirm_workspace_candidates,
     import_workspace_candidate,
     migrate_instance,
     migration_plan,
@@ -40,6 +43,7 @@ from kb_vault.migration import (  # noqa: E402
     repair_migration,
     retire_source,
     retirement_plan,
+    workspace_completion_audit,
 )
 from kb_vault.workspace_views import audit_workspace_views, build_workspace_views  # noqa: E402
 
@@ -99,11 +103,15 @@ def add_authorship_args(parser: argparse.ArgumentParser) -> None:
 
 
 def identities(args: argparse.Namespace) -> dict[str, Path]:
-    return {
+    explicit = {
         tier: value
         for tier in ("basic", "advanced", "core")
         if (value := getattr(args, f"identity_{tier}", None)) is not None
     }
+    if explicit:
+        return explicit
+    root = getattr(args, "root", None)
+    return discover_identities(root or resolve_workspace())
 
 
 def recipients(args: argparse.Namespace) -> dict[str, str]:
@@ -171,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Agent-ready local knowledge workspace"
     )
-    default_root = Path(os.environ.get("KB_INSTANCE_ROOT", Path.cwd()))
+    default_root = resolve_workspace()
     parser.add_argument("--root", type=Path, default=default_root)
     parser.add_argument("--age-path", type=Path, default=os.environ.get("KB_AGE_PATH"))
     sub = parser.add_subparsers(dest="command", required=True)
@@ -260,6 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workspace_import_parser.add_argument("--target", type=Path, required=True)
     workspace_import_parser.add_argument("--source-path", required=True)
+    workspace_import_parser.add_argument("--confirmation-id", required=True)
     workspace_import_parser.add_argument(
         "--access", choices=("public", "basic", "advanced", "core"), required=True
     )
@@ -276,6 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="concept",
     )
     workspace_import_parser.add_argument("--topic", action="append", default=[])
+    workspace_import_parser.add_argument("--evidence", action="append", default=[])
     workspace_import_parser.add_argument("--raw-only", action="store_true")
     workspace_import_parser.add_argument("--confirm-raw-only", action="store_true")
     workspace_import_parser.add_argument(
@@ -284,6 +294,30 @@ def build_parser() -> argparse.ArgumentParser:
     add_authorship_args(workspace_import_parser)
     add_identity_args(workspace_import_parser)
     add_recipient_args(workspace_import_parser)
+
+    workspace_confirm_parser = sub.add_parser(
+        "agent-workspace-confirm",
+        help="record the exact user-confirmed responsibility and routing fields",
+    )
+    workspace_confirm_parser.add_argument("--target", type=Path, required=True)
+    workspace_confirm_parser.add_argument("--source-path", action="append", required=True)
+    workspace_confirm_parser.add_argument(
+        "--access", choices=("public", "basic", "advanced", "core"), required=True
+    )
+    workspace_confirm_parser.add_argument(
+        "--rights", choices=("owned", "licensed", "restricted", "unknown"), required=True
+    )
+    add_authorship_args(workspace_confirm_parser)
+    workspace_confirm_parser.add_argument(
+        "--wiki-compilation", choices=("compile", "raw-only", "route"), required=True
+    )
+    workspace_confirm_parser.add_argument("--confirm-semantic-decision", action="store_true")
+
+    workspace_completion_parser = sub.add_parser(
+        "agent-workspace-completion-audit",
+        help="verify current source, semantic review, installation and Git sync state",
+    )
+    workspace_completion_parser.add_argument("--target", type=Path, required=True)
 
     migration_repair_plan_parser = sub.add_parser(
         "agent-migration-repair-plan",
@@ -1019,6 +1053,7 @@ def execute(args: argparse.Namespace) -> object:
         return import_workspace_candidate(
             args.target,
             source_path=args.source_path,
+            confirmation_id=args.confirmation_id,
             access=args.access,
             rights=args.rights,
             origin_kind=args.origin_kind,
@@ -1030,6 +1065,7 @@ def execute(args: argparse.Namespace) -> object:
             card_answer=args.card_answer,
             card_kind=args.card_kind,
             topic_names=args.topic,
+            evidence_quotes=args.evidence,
             raw_only=args.raw_only,
             confirm_raw_only=args.confirm_raw_only,
             confirm_route_outside_knowledge=args.confirm_route_outside_knowledge,
@@ -1037,6 +1073,20 @@ def execute(args: argparse.Namespace) -> object:
             recipients=recipients(args),
             age_path=args.age_path,
         )
+    if args.command == "agent-workspace-confirm":
+        return confirm_workspace_candidates(
+            args.target,
+            source_paths=args.source_path,
+            access=args.access,
+            rights=args.rights,
+            origin_kind=args.origin_kind,
+            authorship_status=args.authorship_status,
+            intended_role=args.intended_role or "unknown",
+            wiki_compilation=args.wiki_compilation,
+            confirm_semantic_decision=args.confirm_semantic_decision,
+        )
+    if args.command == "agent-workspace-completion-audit":
+        return workspace_completion_audit(args.target)
     if args.command == "agent-migration-repair-plan":
         return migration_repair_plan(args.target)
     if args.command == "agent-migration-repair-start":

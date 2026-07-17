@@ -7,7 +7,22 @@ import sys
 from pathlib import Path
 
 
-WORKSPACE = Path(os.environ.get("ATLAS_WORKSPACE", Path.cwd())).expanduser().resolve()
+def _entry_workspace() -> Path:
+    configured = os.environ.get("ATLAS_WORKSPACE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    entry = Path(__file__).resolve()
+    for parent in entry.parents:
+        if parent.name in (".codex", ".claudian", ".agents"):
+            return parent.parent.resolve()
+    current = Path.cwd().expanduser().resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".17deg-atlas").is_dir():
+            return candidate
+    return current
+
+
+WORKSPACE = _entry_workspace()
 os.environ["ATLAS_WORKSPACE"] = str(WORKSPACE)
 os.environ["ATLAS_ENTRY_RUNTIME"] = "local"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
