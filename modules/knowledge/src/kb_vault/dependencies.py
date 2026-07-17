@@ -76,9 +76,13 @@ def discover_age_executable(
     active_system = (system or platform.system()).lower()
     suffix = ".exe" if active_system == "windows" else ""
     candidates: list[Path] = []
-    configured = age_path or os.environ.get("KB_AGE_PATH")
+    configured = age_path if age_path is not None else os.environ.get("KB_AGE_PATH")
     if configured:
-        candidates.append(Path(configured))
+        try:
+            resolved = Path(configured).expanduser().resolve()
+            return resolved if resolved.is_file() else None
+        except OSError:
+            return None
     selected_workspace = workspace or atlas_workspace()
     candidates.extend(
         _managed_binary_candidates(
@@ -116,11 +120,23 @@ def discover_age_keygen_executable(
     active_system = (system or platform.system()).lower()
     suffix = ".exe" if active_system == "windows" else ""
     candidates: list[Path] = []
-    configured = keygen_path or os.environ.get("KB_AGE_KEYGEN_PATH")
+    configured = (
+        keygen_path if keygen_path is not None else os.environ.get("KB_AGE_KEYGEN_PATH")
+    )
     if configured:
-        candidates.append(Path(configured))
+        try:
+            resolved = Path(configured).expanduser().resolve()
+            return resolved if resolved.is_file() else None
+        except OSError:
+            return None
     if age_path:
-        candidates.append(Path(age_path).with_name(f"age-keygen{suffix}"))
+        try:
+            sibling = Path(age_path).expanduser().resolve().with_name(
+                f"age-keygen{suffix}"
+            )
+            return sibling if sibling.is_file() else None
+        except OSError:
+            return None
     selected_workspace = workspace or atlas_workspace()
     candidates.extend(
         _managed_binary_candidates(

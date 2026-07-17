@@ -41,7 +41,12 @@ from .github_onboarding import (
     suggested_repository_name,
 )
 from .registry import atlas_workspace, register_instance, registered_instances
-from .migration import MIGRATION_STATE, migration_repair_plan
+from .migration import (
+    MIGRATION_STATE,
+    migration_repair_plan,
+    stage_workspace_materials,
+    workspace_materials_plan,
+)
 
 
 PRIVATE_TIERS = ("basic", "advanced", "core")
@@ -236,6 +241,43 @@ def resolve_workspace(
     )
 
 
+def _existing_materials_plan(
+    target: str | Path,
+    *,
+    action: str | None = None,
+) -> dict[str, Any]:
+    if action not in (None, "import-review", "leave-in-place"):
+        raise KBError("existing materials action must be import-review or leave-in-place")
+    target_root = Path(target).expanduser().resolve()
+    state = workspace_state(target_root)
+    source_root = (atlas_workspace() or Path.cwd()).expanduser().resolve()
+    if state["state"] not in ("new-path", "empty-directory", "existing-instance"):
+        return {
+            "status": "none",
+            "flow": "knowledge-existing-materials",
+            "source": str(source_root),
+            "target": str(target_root),
+            "candidate_count": 0,
+            "confirmation_required": [],
+            "required_inputs": [],
+        }
+    plan = workspace_materials_plan(source_root, target_root)
+    if not plan["candidate_count"]:
+        return plan
+    if action is None:
+        return plan
+    retained = dict(plan)
+    retained["selected_action"] = action
+    retained["required_inputs"] = []
+    retained["confirmation_required"] = [
+        "confirm-existing-materials-import"
+        if action == "import-review"
+        else "confirm-leave-existing-materials"
+    ]
+    retained["status"] = "needs-confirmation"
+    return retained
+
+
 def detect_agent_runtime(value: str = "auto") -> str:
     if value not in ("auto", "local", "remote"):
         raise KBError("Agent runtime must be auto, local, or remote")
@@ -298,10 +340,14 @@ def local_plan(
     mode: str = "test",
     age_path: str | Path | None = None,
     default_name: str | None = None,
+    existing_materials_action: str | None = None,
 ) -> dict[str, Any]:
     if mode not in ("test", "production"):
         raise KBError("local Agent mode must be test or production")
     workspace = workspace_state(target, default_name=default_name)
+    existing_materials = _existing_materials_plan(
+        workspace["root"], action=existing_materials_action
+    )
     action = {
         "existing-instance": "connect-existing",
         "new-path": "create-new",
@@ -320,6 +366,17 @@ def local_plan(
         action = "select-existing-local-instance"
     elif workspace["state"] == "occupied-directory":
         confirmations.append("create-inside-nonempty-current-directory")
+    confirmations.extend(existing_materials.get("confirmation_required", []))
+    if existing_materials.get("candidate_count"):
+        action = (
+            "review-existing-materials-before-continue"
+            if existing_materials_action is None
+            else (
+                "stage-existing-materials-for-semantic-review"
+                if existing_materials_action == "import-review"
+                else "create-with-existing-materials-left-in-place"
+            )
+        )
     if workspace["state"] == "invalid-path":
         confirmations.append("choose-valid-instance-directory")
     if mode == "production":
@@ -330,7 +387,7 @@ def local_plan(
         age_path,
         local_root=workspace["root"],
     )
-    automatic_steps = ["check-runtime"]
+    automatic_steps = ["check-runtime", "inventory-existing-materials"]
     if len(registry_choices) > 1:
         automatic_steps.extend(
             ["reuse-selected-instance", "verify-lock-and-recovery"]
@@ -368,6 +425,7 @@ def local_plan(
         "registered_instance_choices": [value["root"] for value in registry_choices]
         if len(registry_choices) > 1
         else [],
+        "existing_materials": existing_materials,
     }
 
 
@@ -438,6 +496,7 @@ def github_first_plan(
     cli_environment: GitHubCLIEnvironment | None = None,
     dependency_environment: LocalDependencyEnvironment | None = None,
     run_initial_sync: bool = True,
+    existing_materials_action: str | None = None,
 ) -> dict[str, Any]:
     if visibility not in ("private", "public"):
         raise KBError("GitHub visibility must be private or public")
@@ -454,7 +513,9 @@ def github_first_plan(
         mode=mode,
         age_path=age_path,
         default_name=(repository_name.split("/", 1)[-1] if repository_name else None),
+        existing_materials_action=existing_materials_action,
     )
+    existing_materials = local["existing_materials"]
     resolved_runtime = detect_agent_runtime(runtime)
     tool_runtime = _tool_runtime_state()
     if (
@@ -478,6 +539,7 @@ def github_first_plan(
             "onboarding_complete": False,
             "confirmation_required": [],
             "local_plan": local,
+            "existing_materials": existing_materials,
         }
     migration_gate = _migration_gate(workspace["root"], resolved_runtime)
     if migration_gate is not None:
@@ -487,6 +549,16 @@ def github_first_plan(
             if remembered_migration_repository
             else None
         )
+        if repository_value is None:
+            try:
+                migration_state = json.loads(
+                    (Path(workspace["root"]) / MIGRATION_STATE).read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                migration_state = {}
+            planned_repository = migration_state.get("planned_repository")
+            if isinstance(planned_repository, str) and "/" in planned_repository:
+                repository_value = planned_repository
         return {
             **migration_gate,
             "flow": "agent-onboarding",
@@ -501,6 +573,58 @@ def github_first_plan(
             "repository_action": "pause-for-migration-upgrade",
             "local_plan": local,
             "onboarding_complete": False,
+            "existing_materials": existing_materials,
+        }
+    if existing_materials.get("candidate_count") and resolved_runtime != "local":
+        return {
+            "status": "blocked",
+            "flow": "agent-onboarding",
+            "runtime": resolved_runtime,
+            "tool_runtime": tool_runtime,
+            "domain_kind": "personal",
+            "module_kind": "knowledge",
+            "subject_id": None,
+            "workspace": workspace["root"],
+            "workspace_state": workspace["state"],
+            "repository": repository_name,
+            "repository_action": "switch-to-local-entry-for-existing-materials",
+            "confirmation_required": [],
+            "required_inputs": [],
+            "local_plan": local,
+            "existing_materials": existing_materials,
+            "onboarding_complete": False,
+            "terminal_state": "existing-materials-require-local-entry",
+        }
+    if existing_materials.get("candidate_count") and resolved_runtime == "local":
+        requested_repository = repository_name
+        remembered_repository = configured_repository(Path(workspace["root"]))
+        if requested_repository is None and remembered_repository:
+            requested_repository = (
+                f"{remembered_repository['owner']}/{remembered_repository['repo']}"
+            )
+        required_inputs = list(existing_materials.get("required_inputs", []))
+        confirmations = list(existing_materials.get("confirmation_required", []))
+        if requested_repository is None:
+            required_inputs.insert(0, "repository-name")
+        return {
+            "status": "needs-input" if required_inputs else "needs-confirmation",
+            "flow": "agent-onboarding",
+            "runtime": resolved_runtime,
+            "tool_runtime": tool_runtime,
+            "domain_kind": "personal",
+            "module_kind": "knowledge",
+            "subject_id": None,
+            "workspace": workspace["root"],
+            "workspace_state": workspace["state"],
+            "repository": requested_repository,
+            "repository_action": "review-existing-materials-before-github",
+            "repository_visibility": visibility,
+            "required_inputs": list(dict.fromkeys(required_inputs)),
+            "confirmation_required": list(dict.fromkeys(confirmations)),
+            "local_plan": local,
+            "existing_materials": existing_materials,
+            "onboarding_complete": False,
+            "terminal_state": "needs-existing-materials-decision",
         }
     dependency_installation = {"required": False, "manager": "existing", "command": []}
     dependency_confirmations: list[str] = []
@@ -534,6 +658,7 @@ def github_first_plan(
                     }
                 },
                 "local_plan": local,
+                "existing_materials": existing_materials,
             }
         environment = cli_environment or GitHubCLIEnvironment()
         active = environment.client()
@@ -600,6 +725,7 @@ def github_first_plan(
                     }
                 },
                 "local_plan": local,
+                "existing_materials": existing_materials,
             }
         if discovered:
             existing = discovered[0]
@@ -627,7 +753,11 @@ def github_first_plan(
                     Path(workspace["root"])
                 ),
                 "repository_visibility": visibility,
-                "required_inputs": ["repository-name"],
+                "required_inputs": list(
+                    dict.fromkeys(
+                        ["repository-name", *existing_materials.get("required_inputs", [])]
+                    )
+                ),
                 "confirmation_required": list(dict.fromkeys(confirmations)),
                 "dependency_installation": {
                     "age": {
@@ -636,6 +766,7 @@ def github_first_plan(
                     }
                 },
                 "local_plan": local,
+                "existing_materials": existing_materials,
             }
     local_layout = (
         _local_instance_layout(workspace["root"])
@@ -725,6 +856,7 @@ def github_first_plan(
                 }
             },
             "local_plan": local,
+            "existing_materials": existing_materials,
         }
     if automatic_local_selection and len(local_candidates) > 1:
         matching_local = []
@@ -770,6 +902,7 @@ def github_first_plan(
         "branch": branch if not existing else existing["default_branch"],
         "confirmation_required": confirmations,
         "local_plan": local,
+        "existing_materials": existing_materials,
         "dependency_installation": {
             "age": {
                 "required": dependency_installation["required"],
@@ -798,6 +931,9 @@ def github_first_setup(
     confirm_github_login_retry: bool = False,
     confirm_age_install: bool = False,
     confirm_initial_sync: bool = False,
+    existing_materials_action: str | None = None,
+    confirm_existing_materials_import: bool = False,
+    confirm_leave_existing_materials: bool = False,
     run_initial_sync: bool = True,
     token: str | None = None,
     client: GitHubRepositoryClient | None = None,
@@ -810,6 +946,82 @@ def github_first_setup(
         age_path=age_path,
         confirm=confirm_age_install,
     )
+    preliminary_workspace = workspace_state(
+        target,
+        default_name=(repository_name.split("/", 1)[-1] if repository_name else None),
+    )
+    preliminary_materials = _existing_materials_plan(
+        preliminary_workspace["root"], action=existing_materials_action
+    )
+    if preliminary_materials.get("candidate_count"):
+        if detect_agent_runtime(runtime) != "local":
+            raise KBError("existing workspace materials require the local Atlas entry")
+        remembered_repository = configured_repository(Path(preliminary_workspace["root"]))
+        planned_repository = repository_name
+        if planned_repository is None and remembered_repository:
+            planned_repository = (
+                f"{remembered_repository['owner']}/{remembered_repository['repo']}"
+            )
+        if existing_materials_action is None:
+            raise KBError(
+                "choose whether to import existing materials for review or leave them in place"
+            )
+        if existing_materials_action == "import-review":
+            if planned_repository is None:
+                raise KBError("choose a GitHub repository name before importing existing materials")
+            if not confirm_existing_materials_import:
+                raise KBError("existing material import requires explicit confirmation")
+            resolved_age = _preflight(resolved_dependency_age, require_git=initialize_git)
+            local = local_setup(
+                preliminary_workspace["root"],
+                mode=mode,
+                age_path=resolved_age,
+                initialize_git=initialize_git,
+                run_self_test=run_self_test,
+                confirm_production_key_use=confirm_production_key_use,
+                confirm_nonempty_directory=confirm_nonempty_directory,
+            )
+            root = Path(local["root"])
+            manifest = ensure_personal_domain_manifest(root)
+            instance_registered = register_instance(root, manifest)
+            staged = stage_workspace_materials(
+                preliminary_materials["source"],
+                root,
+                confirm_existing_materials_import=True,
+                planned_repository=planned_repository,
+                age_path=resolved_age,
+            )
+            return {
+                **staged,
+                "flow": "agent-onboarding",
+                "runtime": "local",
+                "tool_runtime": _tool_runtime_state(),
+                "domain_kind": "personal",
+                "module_kind": "knowledge",
+                "subject_id": manifest.get("subject_id"),
+                "workspace": local["root"],
+                "workspace_action": local["action"],
+                "repository": planned_repository,
+                "repository_url": None,
+                "repository_created": False,
+                "repository_cloned": False,
+                "git_remote_bound": bool(remembered_repository),
+                "instance_registered": instance_registered,
+                "initial_sync": {"committed": False, "pushed": False},
+                "verified": local["verification"]["ok"],
+                "validation": {
+                    "local_integrity": bool(local["verification"]["ok"]),
+                    "existing_materials_staged": bool(staged["candidate_count"]),
+                    "semantic_review": False,
+                    "repository_binding": bool(remembered_repository),
+                    "initial_sync": False,
+                },
+                "onboarding_complete": False,
+            }
+        if existing_materials_action != "leave-in-place":
+            raise KBError("existing materials action is invalid")
+        if not confirm_leave_existing_materials:
+            raise KBError("leaving existing materials out requires explicit confirmation")
     if client is None and token is None:
         environment = cli_environment or GitHubCLIEnvironment()
         environment.install(confirm=confirm_github_cli_install)
@@ -832,6 +1044,7 @@ def github_first_setup(
         client=active,
         dependency_environment=dependencies,
         run_initial_sync=run_initial_sync,
+        existing_materials_action=existing_materials_action,
     )
     if plan.get("terminal_state") in (
         "needs-migration-repair",
@@ -844,6 +1057,70 @@ def github_first_setup(
         if plan.get("repository_action") == "choose-repository-name":
             raise KBError("choose a GitHub repository name before setup")
         raise KBError("choose one discovered knowledge repository before setup")
+    existing_materials = plan.get("existing_materials", {})
+    if existing_materials.get("candidate_count"):
+        if existing_materials_action is None:
+            raise KBError(
+                "choose whether to import existing materials for review or leave them in place"
+            )
+        if existing_materials_action == "import-review":
+            if plan["runtime"] != "local":
+                raise KBError("existing material review requires the local Atlas entry")
+            if not confirm_existing_materials_import:
+                raise KBError("existing material import requires explicit confirmation")
+            resolved_age = _preflight(resolved_dependency_age, require_git=initialize_git)
+            local = local_setup(
+                plan["workspace"],
+                mode=mode,
+                age_path=resolved_age,
+                initialize_git=initialize_git,
+                run_self_test=run_self_test,
+                confirm_production_key_use=confirm_production_key_use,
+                confirm_nonempty_directory=confirm_nonempty_directory,
+            )
+            root = Path(local["root"])
+            manifest = ensure_personal_domain_manifest(
+                root, subject_id=plan["subject_id"]
+            )
+            instance_registered = register_instance(root, manifest)
+            staged = stage_workspace_materials(
+                existing_materials["source"],
+                root,
+                confirm_existing_materials_import=True,
+                planned_repository=plan["repository"],
+                age_path=resolved_age,
+            )
+            return {
+                **staged,
+                "flow": "agent-onboarding",
+                "runtime": plan["runtime"],
+                "tool_runtime": _tool_runtime_state(),
+                "domain_kind": plan["domain_kind"],
+                "module_kind": plan["module_kind"],
+                "subject_id": plan["subject_id"],
+                "workspace": local["root"],
+                "workspace_action": local["action"],
+                "repository": plan["repository"],
+                "repository_url": plan["repository_url"],
+                "repository_created": False,
+                "repository_cloned": False,
+                "git_remote_bound": False,
+                "instance_registered": instance_registered,
+                "initial_sync": {"committed": False, "pushed": False},
+                "verified": local["verification"]["ok"],
+                "validation": {
+                    "local_integrity": bool(local["verification"]["ok"]),
+                    "existing_materials_staged": bool(staged["candidate_count"]),
+                    "semantic_review": False,
+                    "repository_binding": False,
+                    "initial_sync": False,
+                },
+                "onboarding_complete": False,
+            }
+        if existing_materials_action != "leave-in-place":
+            raise KBError("existing materials action is invalid")
+        if not confirm_leave_existing_materials:
+            raise KBError("leaving existing materials out requires explicit confirmation")
     if "create-github-repository" in plan["confirmation_required"] and not confirm_repository_create:
         raise KBError("GitHub repository creation requires confirmation")
     if "connect-existing-repository" in plan["confirmation_required"] and not confirm_existing_repository:
@@ -939,12 +1216,15 @@ def github_first_setup(
     migration_retirement_required = False
     migration_retirement_complete = True
     if migration_state_path.is_file():
-        migration_retirement_required = True
         migration_state = json.loads(migration_state_path.read_text(encoding="utf-8"))
+        migration_retirement_required = bool(
+            migration_state.get("retirement_required", True)
+        )
         migration_retirement_complete = isinstance(
             migration_state.get("retirement"), dict
-        )
-        validation["migration_retirement"] = migration_retirement_complete
+        ) if migration_retirement_required else True
+        if migration_retirement_required:
+            validation["migration_retirement"] = migration_retirement_complete
     onboarding_complete = all(validation.values())
     terminal_state = "complete" if onboarding_complete else "partial"
     if (

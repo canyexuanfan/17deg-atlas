@@ -31,6 +31,7 @@ from kb_vault.agent import (  # noqa: E402
 from kb_vault.adapters.github_contents import GitHubContentsAdapter  # noqa: E402
 from kb_vault.hermes import handle_hermes_request  # noqa: E402
 from kb_vault.migration import (  # noqa: E402
+    import_workspace_candidate,
     migrate_instance,
     migration_plan,
     migration_repair_plan,
@@ -183,6 +184,10 @@ def build_parser() -> argparse.ArgumentParser:
     agent_start_plan.add_argument("--repository-name")
     agent_start_plan.add_argument("--visibility", choices=("private", "public"), default="private")
     agent_start_plan.add_argument("--mode", choices=("test", "production"), default="test")
+    agent_start_plan.add_argument(
+        "--existing-materials-action",
+        choices=("import-review", "leave-in-place"),
+    )
 
     agent_start = sub.add_parser(
         "agent-start", help="connect GitHub and prepare the first knowledge workspace"
@@ -204,6 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
     agent_start.add_argument("--confirm-initial-sync", action="store_true")
     agent_start.add_argument("--confirm-production-key-use", action="store_true")
     agent_start.add_argument("--confirm-nonempty-directory", action="store_true")
+    agent_start.add_argument(
+        "--existing-materials-action",
+        choices=("import-review", "leave-in-place"),
+    )
+    agent_start.add_argument("--confirm-existing-materials-import", action="store_true")
+    agent_start.add_argument("--confirm-leave-existing-materials", action="store_true")
 
     migration_source_parser = sub.add_parser(
         "agent-migration-source", help="prepare a local source for a verified migration"
@@ -242,6 +253,37 @@ def build_parser() -> argparse.ArgumentParser:
     migration_review_parser.add_argument("--wiki-object-id", action="append", default=[])
     migration_review_parser.add_argument("--confirm-raw-only", action="store_true")
     add_identity_args(migration_review_parser)
+
+    workspace_import_parser = sub.add_parser(
+        "agent-workspace-import",
+        help="absorb one staged workspace file into Raw and candidate Wiki objects",
+    )
+    workspace_import_parser.add_argument("--target", type=Path, required=True)
+    workspace_import_parser.add_argument("--source-path", required=True)
+    workspace_import_parser.add_argument(
+        "--access", choices=("public", "basic", "advanced", "core"), required=True
+    )
+    workspace_import_parser.add_argument(
+        "--rights", choices=("owned", "licensed", "restricted", "unknown"), required=True
+    )
+    workspace_import_parser.add_argument("--title", default="")
+    workspace_import_parser.add_argument("--summary", default="")
+    workspace_import_parser.add_argument("--card-question", default="")
+    workspace_import_parser.add_argument("--card-answer", default="")
+    workspace_import_parser.add_argument(
+        "--card-kind",
+        choices=("concept", "claim", "question", "pattern", "practice", "case", "decision"),
+        default="concept",
+    )
+    workspace_import_parser.add_argument("--topic", action="append", default=[])
+    workspace_import_parser.add_argument("--raw-only", action="store_true")
+    workspace_import_parser.add_argument("--confirm-raw-only", action="store_true")
+    workspace_import_parser.add_argument(
+        "--confirm-route-outside-knowledge", action="store_true"
+    )
+    add_authorship_args(workspace_import_parser)
+    add_identity_args(workspace_import_parser)
+    add_recipient_args(workspace_import_parser)
 
     migration_repair_plan_parser = sub.add_parser(
         "agent-migration-repair-plan",
@@ -920,6 +962,7 @@ def execute(args: argparse.Namespace) -> object:
             visibility=args.visibility,
             mode=args.mode,
             age_path=args.age_path,
+            existing_materials_action=args.existing_materials_action,
         )
     if args.command == "agent-start":
         return github_first_setup(
@@ -941,6 +984,9 @@ def execute(args: argparse.Namespace) -> object:
             confirm_initial_sync=args.confirm_initial_sync,
             confirm_production_key_use=args.confirm_production_key_use,
             confirm_nonempty_directory=args.confirm_nonempty_directory,
+            existing_materials_action=args.existing_materials_action,
+            confirm_existing_materials_import=args.confirm_existing_materials_import,
+            confirm_leave_existing_materials=args.confirm_leave_existing_materials,
         )
     if args.command == "agent-migration-plan":
         return migration_plan(args.source, args.target, identities=identities(args))
@@ -967,6 +1013,28 @@ def execute(args: argparse.Namespace) -> object:
             wiki_object_ids=args.wiki_object_id,
             identities=identities(args),
             confirm_raw_only=args.confirm_raw_only,
+            age_path=args.age_path,
+        )
+    if args.command == "agent-workspace-import":
+        return import_workspace_candidate(
+            args.target,
+            source_path=args.source_path,
+            access=args.access,
+            rights=args.rights,
+            origin_kind=args.origin_kind,
+            authorship_status=args.authorship_status,
+            intended_role=args.intended_role or "unknown",
+            title=args.title,
+            summary=args.summary,
+            card_question=args.card_question,
+            card_answer=args.card_answer,
+            card_kind=args.card_kind,
+            topic_names=args.topic,
+            raw_only=args.raw_only,
+            confirm_raw_only=args.confirm_raw_only,
+            confirm_route_outside_knowledge=args.confirm_route_outside_knowledge,
+            identities=identities(args),
+            recipients=recipients(args),
             age_path=args.age_path,
         )
     if args.command == "agent-migration-repair-plan":

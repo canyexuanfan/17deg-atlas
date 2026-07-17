@@ -46,6 +46,7 @@ from kb_vault.github_onboarding import (  # noqa: E402
     initial_git_sync,
     resolve_github_token,
 )
+from kb_vault.migration import import_workspace_candidate, migration_repair_plan  # noqa: E402
 
 
 def load_remote():
@@ -337,6 +338,253 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual("new-path", plan["workspace_state"])
         self.assertEqual([], plan["confirmation_required"])
 
+    def test_loose_workspace_materials_are_detected_before_github(self) -> None:
+        workspace = self.base / "existing-materials"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        (questions / "first.md").write_text("first user note", encoding="utf-8")
+        (questions / "second.md").write_text("second user note", encoding="utf-8")
+        (workspace / ".obsidian").mkdir()
+        (workspace / ".obsidian" / "workspace.json").write_text("{}", encoding="utf-8")
+        (workspace / "欢迎.md").write_text("editor control file", encoding="utf-8")
+        fake = self.FakeGitHub()
+        with mock.patch.dict(
+            os.environ,
+            {"ATLAS_WORKSPACE": str(workspace), "KB_INSTANCE_ROOT": ""},
+            clear=False,
+        ):
+            plan = github_first_plan(
+                runtime="local",
+                repository_name="alice-space",
+                client=fake,
+                run_initial_sync=False,
+            )
+        self.assertEqual("needs-existing-materials-decision", plan["terminal_state"])
+        self.assertEqual("review-existing-materials-before-github", plan["repository_action"])
+        self.assertEqual(
+            "review-existing-materials-before-continue", plan["local_plan"]["action"]
+        )
+        self.assertEqual(2, plan["existing_materials"]["candidate_count"])
+        self.assertEqual(["questions"], [value["group"] for value in plan["existing_materials"]["groups"]])
+        self.assertEqual(["existing-materials-action"], plan["required_inputs"])
+        leave_option = next(
+            item
+            for item in plan["existing_materials"]["action_options"]
+            if item["choice"] == "leave-in-place"
+        )
+        self.assertEqual(
+            "continue-without-importing-existing-materials", leave_option["effect"]
+        )
+        self.assertEqual([], fake.created)
+
+    def test_existing_instance_still_detects_unabsorbed_parent_materials(self) -> None:
+        workspace = self.base / "existing-target-with-materials"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        (questions / "legacy.md").write_text("legacy user material", encoding="utf-8")
+        target = workspace / "alice-space"
+        initialize_personal_domain(target)
+        fake = self.FakeGitHub()
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            plan = github_first_plan(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=fake,
+                run_initial_sync=False,
+            )
+        self.assertEqual(1, plan["existing_materials"]["candidate_count"])
+        self.assertEqual("needs-existing-materials-decision", plan["terminal_state"])
+
+    def test_remote_entry_cannot_silently_skip_local_workspace_materials(self) -> None:
+        workspace = self.base / "remote-materials"
+        workspace.mkdir()
+        (workspace / "note.md").write_text("local-only source material", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            plan = github_first_plan(
+                runtime="remote",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                run_initial_sync=False,
+            )
+        self.assertEqual("existing-materials-require-local-entry", plan["terminal_state"])
+        self.assertEqual("switch-to-local-entry-for-existing-materials", plan["repository_action"])
+
+    def test_workspace_materials_are_staged_then_absorbed_before_remote_creation(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "absorb-workspace"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        original = questions / "rough-note.md"
+        original.write_text("A rough note that must be preserved exactly.\n", encoding="utf-8")
+        target = workspace / "alice-space"
+        fake = self.FakeGitHub()
+        with mock.patch.dict(
+            os.environ,
+            {"ATLAS_WORKSPACE": str(workspace), "KB_INSTANCE_ROOT": ""},
+            clear=False,
+        ):
+            staged = github_first_setup(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=fake,
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+                existing_materials_action="import-review",
+                confirm_existing_materials_import=True,
+            )
+            absorbed = import_workspace_candidate(
+                target,
+                source_path="questions/rough-note.md",
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="knowledge",
+                summary="This note records a reusable test insight.",
+                card_question="What does the rough note preserve?",
+                card_answer="It preserves the original material and its traceability.",
+                topic_names=["Knowledge migration"],
+                age_path=self.age,
+            )
+        self.assertEqual("needs-semantic-review", staged["terminal_state"])
+        self.assertFalse(staged["onboarding_complete"])
+        self.assertEqual([], fake.created)
+        staged_copy = target / "knowledge" / "inbox" / "migration" / "workspace" / "questions" / original.name
+        self.assertEqual(original.read_bytes(), staged_copy.read_bytes())
+        self.assertEqual("ready-for-initial-sync", absorbed["terminal_state"])
+        self.assertFalse(absorbed["retirement_required"])
+        self.assertTrue(original.is_file())
+        self.assertTrue(any((target / "knowledge" / "raw").rglob("*.md")))
+        self.assertGreaterEqual(len(list((target / "knowledge" / "wiki").rglob("*.md"))), 3)
+        state = json.loads(
+            (target / ".atlas" / "state" / "knowledge-migration.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("verified", state["status"])
+        self.assertEqual(0, state["semantic_import"]["pending_count"])
+
+    def test_verified_workspace_import_reopens_only_new_or_changed_materials(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "incremental-workspace"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        first = questions / "first.md"
+        first.write_text("First stable note.\n", encoding="utf-8")
+        target = workspace / "alice-space"
+        environment = {"ATLAS_WORKSPACE": str(workspace), "KB_INSTANCE_ROOT": ""}
+        with mock.patch.dict(os.environ, environment, clear=False):
+            github_first_setup(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+                existing_materials_action="import-review",
+                confirm_existing_materials_import=True,
+            )
+            import_workspace_candidate(
+                target,
+                source_path="questions/first.md",
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="knowledge",
+                summary="The first stable note.",
+                card_question="Which note is stable?",
+                card_answer="The first note is stable.",
+                topic_names=["Incremental import"],
+                age_path=self.age,
+            )
+            second = questions / "second.md"
+            second.write_text("A later note must not be hidden by the old receipt.\n", encoding="utf-8")
+            plan = github_first_plan(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                age_path=self.age,
+                run_initial_sync=False,
+            )
+            restaged = github_first_setup(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+                existing_materials_action="import-review",
+                confirm_existing_materials_import=True,
+            )
+        self.assertEqual("needs-existing-materials-decision", plan["terminal_state"])
+        self.assertEqual(1, plan["existing_materials"]["candidate_count"])
+        self.assertEqual(["questions/second.md"], plan["existing_materials"]["sample_paths"])
+        self.assertEqual(1, restaged["candidate_count"])
+        self.assertEqual(1, restaged["pending_count"])
+        self.assertIn(
+            "这些材料应进入知识库，还是确认保留在知识库之外？",
+            restaged["batch_questions"],
+        )
+        state = json.loads(
+            (target / ".atlas" / "state" / "knowledge-migration.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        by_path = {item["path"]: item for item in state["semantic_candidates"]}
+        self.assertEqual("completed", by_path["questions/first.md"]["status"])
+        self.assertEqual("pending", by_path["questions/second.md"]["status"])
+
+    def test_nonknowledge_workspace_material_is_routed_without_empty_module(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "route-workspace"
+        drafts = workspace / "drafts"
+        drafts.mkdir(parents=True)
+        original = drafts / "article.md"
+        original.write_text("A draft article, not a knowledge object.\n", encoding="utf-8")
+        target = workspace / "alice-space"
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            github_first_setup(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+                existing_materials_action="import-review",
+                confirm_existing_materials_import=True,
+            )
+            routed = import_workspace_candidate(
+                target,
+                source_path="drafts/article.md",
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="creation",
+                confirm_route_outside_knowledge=True,
+                age_path=self.age,
+            )
+        self.assertEqual("ready-for-initial-sync", routed["terminal_state"])
+        self.assertEqual("creations", routed["target_module"])
+        self.assertTrue(original.is_file())
+        self.assertFalse((target / "creations").exists())
+        self.assertFalse(migration_repair_plan(target)["repair_required"])
+        state = json.loads(
+            (target / ".atlas" / "state" / "knowledge-migration.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(1, state["semantic_import"]["candidate_count"])
+        self.assertEqual(1, state["semantic_import"]["routed_count"])
+        self.assertEqual(0, state["semantic_import"]["imported_count"])
+
     def test_github_first_reuses_single_existing_child_instance(self) -> None:
         if not self.age:
             self.skipTest("set KB_TEST_AGE or install age")
@@ -551,7 +799,9 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 client=fake,
             )
         self.assertEqual(str((workspace / "alice-memory").resolve()), plan["workspace"])
-        self.assertEqual("example-user/alice-memory", plan["repository"])
+        self.assertEqual("alice-memory", plan["repository"])
+        self.assertEqual("needs-existing-materials-decision", plan["terminal_state"])
+        self.assertEqual(1, plan["existing_materials"]["candidate_count"])
 
     def test_domain_repository_binding_stays_in_personal_manifest(self) -> None:
         root = self.base / "alice-space"
@@ -1186,20 +1436,23 @@ class LocalAgentExperienceTests(unittest.TestCase):
             runner=runner,
             system="windows",
         )
-        installation = environment.age_installation()
-        self.assertTrue(installation["required"])
-        self.assertEqual("winget", installation["manager"])
-        self.assertIn("FiloSottile.age", installation["command"])
-        plan = github_first_plan(
-            self.base / "age-install-plan",
-            runtime="local",
-            client=self.FakeGitHub(),
-            dependency_environment=environment,
-        )
-        self.assertIn("install-age", plan["confirmation_required"])
-        with self.assertRaises(KBError):
-            environment.install_age()
-        resolved = environment.install_age(confirm=True)
+        with mock.patch(
+            "kb_vault.dependencies._windows_age_candidates", return_value=[]
+        ):
+            installation = environment.age_installation()
+            self.assertTrue(installation["required"])
+            self.assertEqual("winget", installation["manager"])
+            self.assertIn("FiloSottile.age", installation["command"])
+            plan = github_first_plan(
+                self.base / "age-install-plan",
+                runtime="local",
+                client=self.FakeGitHub(),
+                dependency_environment=environment,
+            )
+            self.assertIn("install-age", plan["confirmation_required"])
+            with self.assertRaises(KBError):
+                environment.install_age()
+            resolved = environment.install_age(confirm=True)
         self.assertEqual(age.resolve(), resolved)
         self.assertEqual(1, len(commands))
 
@@ -1241,6 +1494,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
             "LOCALAPPDATA": str(local_app_data),
             "KB_AGE_PATH": "",
             "KB_AGE_KEYGEN_PATH": "",
+            "PATH": "",
         }
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch(
             "kb_vault.dependencies.platform.system", return_value="Windows"
