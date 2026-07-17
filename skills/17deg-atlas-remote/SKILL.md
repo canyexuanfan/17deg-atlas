@@ -25,6 +25,8 @@ description: 远端入口 Skill，用于远端 Agent 连接个人知识库并执
 
 完成后不得自行追加再次连接、额外安装或其他验收动作。
 
+若当前环境支持并返回 GitHub 网页授权设备码，授权页面必须由用户本人完成。收到 `terminal_state=needs-user-github-authorization` 后，只展示 `user_action.verification_uri` 与 `user_action.device_code` 并暂停；禁止 Agent 输入设备码、点击授权页面、关闭浏览器、以任何方式自动操作浏览器或重复启动授权。用户确认完成后只检查登录状态；若返回 `github-authorization-failed`，必须先说明原因并重新取得用户确认，才能发起一次新授权。
+
 ## 自然语言路由
 
 用户只描述目标。Agent 只调用当前运行时明确授权且已部署的能力，统一通过 `scripts/atlas.py remote` 调用：

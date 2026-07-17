@@ -795,6 +795,7 @@ def github_first_setup(
     confirm_nonempty_directory: bool = False,
     confirm_github_cli_install: bool = False,
     confirm_github_login: bool = False,
+    confirm_github_login_retry: bool = False,
     confirm_age_install: bool = False,
     confirm_initial_sync: bool = False,
     run_initial_sync: bool = True,
@@ -812,7 +813,12 @@ def github_first_setup(
     if client is None and token is None:
         environment = cli_environment or GitHubCLIEnvironment()
         environment.install(confirm=confirm_github_cli_install)
-        environment.authenticate(confirm=confirm_github_login)
+        authorization = environment.authenticate(
+            confirm=confirm_github_login,
+            confirm_retry=confirm_github_login_retry,
+        )
+        if authorization.get("terminal_state") != "ready":
+            return authorization
         active = environment.client()
     else:
         active = _github_client(client, token=token)

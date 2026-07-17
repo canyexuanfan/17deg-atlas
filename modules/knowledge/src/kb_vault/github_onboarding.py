@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
 import os
 import platform
 import re
 import shutil
 import subprocess
+import tempfile
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -593,14 +597,155 @@ class GitHubCLIEnvironment:
         executable: str | None = None,
         which: Callable[[str], str | None] = shutil.which,
         runner: Callable[..., Any] = subprocess.run,
+        process_launcher: Callable[..., Any] = subprocess.Popen,
+        process_checker: Callable[[int], bool] | None = None,
+        state_root: Path | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
         common_paths: list[Path] | None = None,
         package_manager_paths: Mapping[str, list[Path]] | None = None,
     ):
         self._executable = executable
         self.which = which
         self.runner = runner
+        self.process_launcher = process_launcher
+        self.process_checker = process_checker or self._process_is_running
+        self.state_root = state_root or (
+            Path(tempfile.gettempdir()) / "17deg-atlas" / "github-authorization"
+        )
+        self.sleeper = sleeper
         self.common_paths = common_paths
         self.package_manager_paths = package_manager_paths
+
+    @staticmethod
+    def _process_is_running(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if platform.system().lower() == "windows":
+            process_query_limited_information = 0x1000
+            still_active = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
+                process_query_limited_information,
+                False,
+                pid,
+            )
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return False
+                return exit_code.value == still_active
+            finally:
+                kernel32.CloseHandle(handle)
+        try:
+            os.kill(pid, 0)
+        except (OSError, ValueError):
+            return False
+        return True
+
+    @property
+    def _authorization_state_path(self) -> Path:
+        return self.state_root / "state.json"
+
+    @property
+    def _authorization_stdout_path(self) -> Path:
+        return self.state_root / "stdout.log"
+
+    @property
+    def _authorization_stderr_path(self) -> Path:
+        return self.state_root / "stderr.log"
+
+    def _read_authorization_state(self) -> dict[str, Any] | None:
+        try:
+            value = json.loads(self._authorization_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return dict(value) if isinstance(value, Mapping) else None
+
+    def _write_authorization_state(self, value: Mapping[str, Any]) -> None:
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        temporary = self._authorization_state_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(dict(value), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(self._authorization_state_path)
+
+    def _authorization_logs(self) -> str:
+        parts: list[str] = []
+        for path in (self._authorization_stdout_path, self._authorization_stderr_path):
+            try:
+                parts.append(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+        return "\n".join(parts)
+
+    def _clear_authorization_state(self) -> None:
+        for path in (
+            self._authorization_state_path,
+            self._authorization_state_path.with_suffix(".tmp"),
+            self._authorization_stdout_path,
+            self._authorization_stderr_path,
+        ):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+
+    @staticmethod
+    def _authorization_failure_reason(logs: str) -> str:
+        lowered = logs.lower()
+        if "unexpected eof" in lowered or "proxy" in lowered:
+            return "network-or-proxy"
+        if "expired" in lowered:
+            return "device-code-expired"
+        if "cancel" in lowered or "denied" in lowered:
+            return "authorization-cancelled"
+        return "authorization-not-completed"
+
+    @staticmethod
+    def _authorization_result(
+        terminal_state: str,
+        *,
+        status: str,
+        confirmation_required: list[str] | None = None,
+        device_code: str | None = None,
+        verification_uri: str | None = None,
+        failure_reason: str | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "status": status,
+            "flow": "github-authorization",
+            "terminal_state": terminal_state,
+            "confirmation_required": confirmation_required or [],
+        }
+        if terminal_state == "needs-user-github-authorization":
+            result.update(
+                {
+                    "next_action": "complete-github-browser-authorization",
+                    "user_action": {
+                        "verification_uri": verification_uri,
+                        "device_code": device_code,
+                    },
+                    "do_not_retry": True,
+                }
+            )
+        elif terminal_state == "github-authorization-failed":
+            result.update(
+                {
+                    "next_action": "review-failure-and-confirm-retry",
+                    "failure_reason": failure_reason or "authorization-not-completed",
+                    "do_not_retry": True,
+                }
+            )
+        elif terminal_state == "ready":
+            result["next_action"] = "continue"
+        else:
+            result["next_action"] = "confirm-github-browser-authorization"
+        return result
 
     @staticmethod
     def _existing_path(candidates: list[Path]) -> str | None:
@@ -712,28 +857,10 @@ class GitHubCLIEnvironment:
         )
         return result.returncode == 0
 
-    def authenticate(self, *, confirm: bool = False) -> None:
+    def _configure_git_authentication(self) -> None:
         executable = self.executable
         if not executable:
             raise KBError("GitHub CLI is unavailable")
-        if not self.authenticated():
-            if not confirm:
-                raise KBError("GitHub browser authorization requires confirmation")
-            login = self.runner(
-                [
-                    executable,
-                    "auth",
-                    "login",
-                    "--hostname",
-                    "github.com",
-                    "--git-protocol",
-                    "https",
-                    "--web",
-                ],
-                check=False,
-            )
-            if login.returncode != 0 or not self.authenticated():
-                raise KBError("GitHub browser authorization did not finish")
         configured = self.runner(
             [executable, "auth", "setup-git", "--hostname", "github.com"],
             stdout=subprocess.PIPE,
@@ -742,6 +869,154 @@ class GitHubCLIEnvironment:
         )
         if configured.returncode != 0:
             raise KBError("GitHub Git authentication setup failed")
+
+    def _pending_authorization(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        device_code = str(state.get("device_code", "")).strip()
+        verification_uri = str(state.get("verification_uri", "")).strip()
+        pid = int(state.get("pid", 0) or 0)
+        started_at = float(state.get("started_at", 0) or 0)
+        logs = self._authorization_logs()
+        if time.time() - started_at > 900:
+            failed = {
+                **dict(state),
+                "status": "failed",
+                "failure_reason": "device-code-expired",
+            }
+            self._write_authorization_state(failed)
+            return self._authorization_result(
+                "github-authorization-failed",
+                status="needs-confirmation",
+                confirmation_required=["retry-github-authorization"],
+                failure_reason="device-code-expired",
+            )
+        if pid and self.process_checker(pid):
+            return self._authorization_result(
+                "needs-user-github-authorization",
+                status="needs-user-action",
+                device_code=device_code,
+                verification_uri=verification_uri,
+            )
+        reason = self._authorization_failure_reason(logs)
+        failed = {**dict(state), "status": "failed", "failure_reason": reason}
+        self._write_authorization_state(failed)
+        return self._authorization_result(
+            "github-authorization-failed",
+            status="needs-confirmation",
+            confirmation_required=["retry-github-authorization"],
+            failure_reason=reason,
+        )
+
+    def _start_authorization(self) -> dict[str, Any]:
+        executable = self.executable
+        if not executable:
+            raise KBError("GitHub CLI is unavailable")
+        self._clear_authorization_state()
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        command = [
+            executable,
+            "auth",
+            "login",
+            "--hostname",
+            "github.com",
+            "--git-protocol",
+            "https",
+            "--web",
+        ]
+        environment = os.environ.copy()
+        environment["GH_PROMPT_DISABLED"] = "1"
+        creationflags = 0
+        if platform.system().lower() == "windows":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        with self._authorization_stdout_path.open("wb") as stdout, self._authorization_stderr_path.open(
+            "wb"
+        ) as stderr:
+            process = self.process_launcher(
+                command,
+                stdout=stdout,
+                stderr=stderr,
+                stdin=subprocess.DEVNULL,
+                env=environment,
+                creationflags=creationflags,
+            )
+        device_code = ""
+        verification_uri = ""
+        for _attempt in range(40):
+            logs = self._authorization_logs()
+            code_match = re.search(
+                r"one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})",
+                logs,
+                flags=re.IGNORECASE,
+            )
+            uri_match = re.search(r"https://github\.com/login/device\S*", logs)
+            if code_match and uri_match:
+                device_code = code_match.group(1).upper()
+                verification_uri = uri_match.group(0).rstrip(".,;)")
+                break
+            if process.poll() is not None:
+                break
+            self.sleeper(0.25)
+        if not device_code or not verification_uri:
+            if process.poll() is None:
+                process.terminate()
+            reason = self._authorization_failure_reason(self._authorization_logs())
+            self._write_authorization_state(
+                {
+                    "status": "failed",
+                    "failure_reason": reason,
+                    "started_at": time.time(),
+                }
+            )
+            return self._authorization_result(
+                "github-authorization-failed",
+                status="needs-confirmation",
+                confirmation_required=["retry-github-authorization"],
+                failure_reason=reason,
+            )
+        state = {
+            "status": "pending",
+            "pid": int(process.pid),
+            "device_code": device_code,
+            "verification_uri": verification_uri,
+            "started_at": time.time(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._write_authorization_state(state)
+        return self._authorization_result(
+            "needs-user-github-authorization",
+            status="needs-user-action",
+            device_code=device_code,
+            verification_uri=verification_uri,
+        )
+
+    def authenticate(
+        self, *, confirm: bool = False, confirm_retry: bool = False
+    ) -> dict[str, Any]:
+        executable = self.executable
+        if not executable:
+            raise KBError("GitHub CLI is unavailable")
+        if self.authenticated():
+            self._configure_git_authentication()
+            self._clear_authorization_state()
+            return self._authorization_result("ready", status="ready")
+        state = self._read_authorization_state()
+        if state and state.get("status") == "pending":
+            return self._pending_authorization(state)
+        if state and state.get("status") == "failed" and not confirm_retry:
+            return self._authorization_result(
+                "github-authorization-failed",
+                status="needs-confirmation",
+                confirmation_required=["retry-github-authorization"],
+                failure_reason=str(
+                    state.get("failure_reason", "authorization-not-completed")
+                ),
+            )
+        if not confirm and not confirm_retry:
+            return self._authorization_result(
+                "needs-confirmation",
+                status="needs-confirmation",
+                confirmation_required=["authorize-github-account"],
+            )
+        return self._start_authorization()
 
     def client(self) -> GitHubCLIRepositoryClient:
         executable = self.executable

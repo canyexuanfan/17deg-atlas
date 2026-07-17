@@ -197,6 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_start.add_argument("--no-initial-sync", action="store_true")
     agent_start.add_argument("--confirm-github-cli-install", action="store_true")
     agent_start.add_argument("--confirm-github-login", action="store_true")
+    agent_start.add_argument("--confirm-github-login-retry", action="store_true")
     agent_start.add_argument("--confirm-age-install", action="store_true")
     agent_start.add_argument("--confirm-repository-create", action="store_true")
     agent_start.add_argument("--confirm-existing-repository", action="store_true")
@@ -933,6 +934,7 @@ def execute(args: argparse.Namespace) -> object:
             run_initial_sync=not args.no_initial_sync,
             confirm_github_cli_install=args.confirm_github_cli_install,
             confirm_github_login=args.confirm_github_login,
+            confirm_github_login_retry=args.confirm_github_login_retry,
             confirm_age_install=args.confirm_age_install,
             confirm_repository_create=args.confirm_repository_create,
             confirm_existing_repository=args.confirm_existing_repository,

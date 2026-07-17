@@ -925,6 +925,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
 
     def test_github_cli_bootstrap_plans_install_and_browser_authorization(self) -> None:
         commands = []
+        launches = []
         installed = {"value": False}
         authenticated = {"value": False}
 
@@ -942,14 +943,36 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
             if command[1:3] == ["auth", "status"]:
                 return subprocess.CompletedProcess(command, 0 if authenticated["value"] else 1)
-            if command[1:3] == ["auth", "login"]:
-                authenticated["value"] = True
-                return subprocess.CompletedProcess(command, 0)
             return subprocess.CompletedProcess(command, 0)
+
+        class PendingProcess:
+            pid = 4242
+
+            @staticmethod
+            def poll():
+                return None
+
+            @staticmethod
+            def terminate():
+                raise AssertionError("a visible device-code flow must not be terminated")
+
+        def launch(command, **kwargs):
+            launches.append(command)
+            kwargs["stderr"].write(
+                b"! First copy your one-time code: ABCD-1234\n"
+                b"Open this URL to continue in your web browser: "
+                b"https://github.com/login/device\n"
+            )
+            kwargs["stderr"].flush()
+            return PendingProcess()
 
         environment = GitHubCLIEnvironment(
             which=which,
             runner=runner,
+            process_launcher=launch,
+            process_checker=lambda pid: pid == 4242,
+            state_root=self.base / "github-auth",
+            sleeper=lambda _seconds: None,
             common_paths=[],
         )
         with mock.patch("kb_vault.github_onboarding.platform.system", return_value="Windows"):
@@ -961,12 +984,125 @@ class LocalAgentExperienceTests(unittest.TestCase):
             with self.assertRaises(KBError):
                 environment.install()
             environment.install(confirm=True)
-            with self.assertRaises(KBError):
-                environment.authenticate()
-            environment.authenticate(confirm=True)
+            needs_confirmation = environment.authenticate()
+            self.assertEqual("needs-confirmation", needs_confirmation["terminal_state"])
+            pending = environment.authenticate(confirm=True)
+            self.assertEqual("needs-user-github-authorization", pending["terminal_state"])
+            self.assertEqual("ABCD-1234", pending["user_action"]["device_code"])
+            self.assertEqual("https://github.com/login/device", pending["user_action"]["verification_uri"])
+            repeated = environment.authenticate(confirm=True)
+            self.assertEqual(pending, repeated)
+            self.assertEqual(1, len(launches))
+            authenticated["value"] = True
+            ready = environment.authenticate()
+            self.assertEqual("ready", ready["terminal_state"])
         self.assertTrue(any(command[0] == "winget" for command in commands))
-        self.assertTrue(any(command[1:3] == ["auth", "login"] for command in commands))
+        self.assertTrue(any(command[1:3] == ["auth", "login"] for command in launches))
         self.assertTrue(any(command[1:3] == ["auth", "setup-git"] for command in commands))
+
+    def test_github_authorization_failure_requires_a_separate_retry_confirmation(self) -> None:
+        launches = []
+
+        def runner(command, **_kwargs):
+            if command[1:3] == ["auth", "status"]:
+                return subprocess.CompletedProcess(command, 1)
+            return subprocess.CompletedProcess(command, 0)
+
+        class ExitedProcess:
+            pid = 5151
+
+            @staticmethod
+            def poll():
+                return 1
+
+            @staticmethod
+            def terminate():
+                return None
+
+        def launch(command, **kwargs):
+            launches.append(command)
+            kwargs["stderr"].write(
+                b"! First copy your one-time code: EFGH-5678\n"
+                b"Open this URL to continue in your web browser: "
+                b"https://github.com/login/device\n"
+                b"failed to authenticate via web browser: unexpected EOF\n"
+            )
+            kwargs["stderr"].flush()
+            return ExitedProcess()
+
+        environment = GitHubCLIEnvironment(
+            executable="gh",
+            runner=runner,
+            process_launcher=launch,
+            process_checker=lambda _pid: False,
+            state_root=self.base / "failed-github-auth",
+            sleeper=lambda _seconds: None,
+        )
+        pending = environment.authenticate(confirm=True)
+        self.assertEqual("needs-user-github-authorization", pending["terminal_state"])
+        failed = environment.authenticate()
+        self.assertEqual("github-authorization-failed", failed["terminal_state"])
+        self.assertEqual("network-or-proxy", failed["failure_reason"])
+        self.assertEqual(["retry-github-authorization"], failed["confirmation_required"])
+        still_failed = environment.authenticate(confirm=True)
+        self.assertEqual("github-authorization-failed", still_failed["terminal_state"])
+        self.assertEqual(1, len(launches))
+        retried = environment.authenticate(confirm_retry=True)
+        self.assertEqual("needs-user-github-authorization", retried["terminal_state"])
+        self.assertEqual(2, len(launches))
+
+    def test_windows_authorization_process_check_is_read_only(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("Windows process query contract")
+        with mock.patch("kb_vault.github_onboarding.os.kill") as unsafe_kill:
+            self.assertTrue(GitHubCLIEnvironment._process_is_running(os.getpid()))
+        unsafe_kill.assert_not_called()
+
+    def test_github_first_setup_hands_device_authorization_back_to_the_user(self) -> None:
+        class Dependencies:
+            @staticmethod
+            def install_age(**_kwargs):
+                return "age"
+
+        class Environment:
+            client_called = False
+
+            @staticmethod
+            def install(**_kwargs):
+                return "gh"
+
+            @staticmethod
+            def authenticate(**_kwargs):
+                return {
+                    "status": "needs-user-action",
+                    "flow": "github-authorization",
+                    "terminal_state": "needs-user-github-authorization",
+                    "next_action": "complete-github-browser-authorization",
+                    "confirmation_required": [],
+                    "user_action": {
+                        "verification_uri": "https://github.com/login/device",
+                        "device_code": "IJKL-9012",
+                    },
+                    "do_not_retry": True,
+                }
+
+            def client(self):
+                self.client_called = True
+                raise AssertionError("repository access must wait for user authorization")
+
+        environment = Environment()
+        result = github_first_setup(
+            self.base / "device-code-workspace",
+            runtime="local",
+            repository_name="device-code-workspace",
+            run_initial_sync=False,
+            cli_environment=environment,
+            dependency_environment=Dependencies(),
+            confirm_github_login=True,
+        )
+        self.assertEqual("needs-user-github-authorization", result["terminal_state"])
+        self.assertEqual("IJKL-9012", result["user_action"]["device_code"])
+        self.assertFalse(environment.client_called)
 
     def test_contents_adapter_accepts_github_multiline_base64(self) -> None:
         encoded = base64.b64encode("知识内容".encode("utf-8")).decode("ascii")
