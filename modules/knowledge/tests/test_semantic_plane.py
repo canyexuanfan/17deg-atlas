@@ -156,6 +156,40 @@ class SemanticPlaneAcceptanceTests(unittest.TestCase):
         self.assertIn("## 问题", card["content"])
         self.assertIn("？", card["title"])
 
+    def test_curation_rejects_damaged_agent_text_and_inherits_confirmed_rights(self) -> None:
+        captured = self.capture(
+            "quality-rights",
+            "中文知识编译必须在写入前拒绝乱码，并继承已经确认的权利字段。",
+        )
+        with self.assertRaisesRegex(KBError, "damaged or replacement characters"):
+            self.curator.curate(
+                request_id="quality-rights-bad",
+                raw_object_ids=[captured["raw_object_id"]],
+                summary="????????????",
+                card_question="这段内容说明了什么？",
+                card_answer="乱码不能成为知识对象。",
+                topic_names=["知识质量"],
+                identities=self.identities,
+            )
+        result = self.curator.curate(
+            request_id="quality-rights-good",
+            raw_object_ids=[captured["raw_object_id"]],
+            summary="中文知识编译必须拒绝乱码并继承已经确认的权利字段。",
+            card_question="知识编译在写入前必须检查什么？",
+            card_answer="必须检查文本编码和责任元数据，并在失败时停止写入。",
+            topic_names=["知识质量", "知识质量"],
+            identities=self.identities,
+        )
+        object_ids = [
+            result["source_summary_id"],
+            result["atomic_card_id"],
+            *[item["object_id"] for item in result["topic_pages"]],
+        ]
+        self.assertEqual(3, len(object_ids))
+        for object_id in object_ids:
+            _path, envelope = self.read(object_id)
+            self.assertEqual("owned", envelope["rights"])
+
     def test_s06_relations_have_type_statement_evidence_and_candidate_review(self) -> None:
         captured = self.capture("s06", "Relations need evidence and explanation.")
         result = self.curator.curate(
@@ -207,6 +241,69 @@ class SemanticPlaneAcceptanceTests(unittest.TestCase):
         self.assertFalse(first["canonical"])
         self.assertEqual("candidate", first["review_state"])
         self.assertFalse(self.vault.public_catalog_records())
+
+    def test_repeated_topic_compilation_aggregates_cards_and_supersedes_prior_projection(self) -> None:
+        first_raw = self.capture(
+            "topic-aggregate-a",
+            "第一份证据说明主题页需要汇总来自不同材料的知识卡片。",
+        )
+        second_raw = self.capture(
+            "topic-aggregate-b",
+            "第二份证据说明同一稳定主题不应该为每篇材料复制一个孤立页面。",
+        )
+        first = self.curator.curate(
+            request_id="topic-aggregate-curate-a",
+            raw_object_ids=[first_raw["raw_object_id"]],
+            summary="主题页需要汇总来自不同材料的知识卡片。",
+            card_question="主题页应该怎样组织卡片？",
+            card_answer="同一稳定主题应把多份来源形成的卡片聚合起来。",
+            topic_names=["主题治理"],
+            identities=self.identities,
+        )
+        second = self.curator.curate(
+            request_id="topic-aggregate-curate-b",
+            raw_object_ids=[second_raw["raw_object_id"]],
+            summary="同一稳定主题不应该产生多个彼此孤立的主题页。",
+            card_question="重复主题应该怎样处理？",
+            card_answer="应生成新的聚合投影并显式替代先前候选版本。",
+            topic_names=["主题治理"],
+            identities=self.identities,
+        )
+        self.assertEqual(
+            first["topic_pages"][0]["topic_id"],
+            second["topic_pages"][0]["topic_id"],
+        )
+        self.assertEqual(
+            first["topic_pages"][0]["object_id"],
+            second["topic_pages"][0]["supersedes_object_id"],
+        )
+        _path, latest = self.read(second["topic_pages"][0]["object_id"])
+        self.assertIn(first["atomic_card_id"], latest["content"])
+        self.assertIn(second["atomic_card_id"], latest["content"])
+        supported = {
+            relation["target_id"]
+            for relation in latest["relations"]
+            if relation["type"] == "supports"
+        }
+        self.assertTrue(
+            {first["atomic_card_id"], second["atomic_card_id"]}.issubset(supported)
+        )
+        self.assertEqual([], second["taxonomy_proposals"])
+
+    def test_single_object_replay_restores_compatibility_object_id(self) -> None:
+        kwargs = {
+            "request_id": "single-object-replay",
+            "tier": "basic",
+            "kind": "raw",
+            "title": "Replay",
+            "summary": "Replay preserves the singular object identifier.",
+            "content": "Replay preserves the singular object identifier.",
+            "rights": "owned",
+        }
+        first = self.vault.add(**kwargs)
+        second = self.vault.add(**kwargs)
+        self.assertEqual(first["object_id"], second["object_id"])
+        self.assertTrue(second["idempotent_replay"])
 
     def test_s13_multiple_raws_inherit_the_highest_classification(self) -> None:
         basic = self.capture("s13-basic", "Basic evidence", tier="basic")

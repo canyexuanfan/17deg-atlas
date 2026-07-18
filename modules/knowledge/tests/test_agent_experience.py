@@ -27,6 +27,7 @@ from kb_vault.bootstrap import (  # noqa: E402
     initialize_personal_domain,
     resolve_knowledge_root,
 )
+from kb_vault.cli import _load_workspace_import_payload  # noqa: E402
 from kb_vault.dependencies import LocalDependencyEnvironment  # noqa: E402
 from kb_vault.agent import (  # noqa: E402
     detect_agent_runtime,
@@ -97,6 +98,45 @@ class LocalAgentExperienceTests(unittest.TestCase):
             atomic_replace(source, destination)
         self.assertEqual(2, calls)
         self.assertEqual("new\n", destination.read_text(encoding="utf-8"))
+
+    def test_decrypt_reports_unreadable_identity_separately_from_wrong_key(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        root = self.base / "identity-error-vault"
+        initialize_instance(root)
+        identity = self.base / "blocked.identity"
+        identity.write_text("AGE-SECRET-KEY-TEST\n", encoding="utf-8")
+        vault = KnowledgeVault(root, age_path=self.age)
+        denied = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=b"",
+            stderr=b"failed to open identity: Access is denied.",
+        )
+        with mock.patch.object(vault, "_run", return_value=denied):
+            with self.assertRaisesRegex(KBError, "current process permissions"):
+                vault.decrypt_bytes(b"ciphertext", identity)
+
+    def test_workspace_import_payload_preserves_utf8_text_and_rejects_extra_fields(self) -> None:
+        payload_path = self.base / "wiki-payload.json"
+        payload = {
+            "summary": "中文摘要必须逐字保持。",
+            "card_question": "为什么要使用 UTF-8 文件？",
+            "card_answer": "避免 PowerShell 命令行转码破坏知识内容。",
+            "topic_names": ["知识质量"],
+            "evidence_quotes": ["中文摘要必须逐字保持"],
+        }
+        payload_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8-sig",
+        )
+        self.assertEqual(payload, _load_workspace_import_payload(payload_path))
+        payload_path.write_text(
+            json.dumps({**payload, "unsupported": True}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(KBError, "unsupported fields"):
+            _load_workspace_import_payload(payload_path)
 
     def test_runtime_auto_requires_an_explicit_entry_or_remote_marker(self) -> None:
         cleared = {
@@ -709,6 +749,77 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertTrue((inbox / "second.md").is_file())
         self.assertNotIn("source_materials_disposition", state)
 
+    def test_workspace_import_aggregates_one_human_topic_view_across_sources(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "aggregate-topic-workspace"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        sources = {
+            "questions/first.md": "第一份材料说明迁移前必须保存可恢复的原始证据。\n",
+            "questions/second.md": "第二份材料说明迁移完成后必须核对派生知识和来源关系。\n",
+        }
+        for relative, content in sources.items():
+            (workspace / relative).write_text(content, encoding="utf-8")
+        target = workspace / "alice-space"
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            github_first_setup(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+                existing_materials_action="import-review",
+                confirm_existing_materials_import=True,
+            )
+            confirmed = confirm_workspace_candidates(
+                target,
+                source_paths=list(sources),
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="ai_assisted",
+                intended_role="knowledge",
+                wiki_compilation="compile",
+                confirm_semantic_decision=True,
+            )
+            receipts = {
+                item["source_path"]: item["confirmation_id"]
+                for item in confirmed["receipts"]
+            }
+            imports = []
+            for index, (relative, content) in enumerate(sources.items(), start=1):
+                imports.append(
+                    import_workspace_candidate(
+                        target,
+                        source_path=relative,
+                        confirmation_id=receipts[relative],
+                        access="basic",
+                        rights="owned",
+                        origin_kind="self",
+                        authorship_status="ai_assisted",
+                        intended_role="knowledge",
+                        summary=content.strip(),
+                        card_question=f"第 {index} 份迁移材料强调了什么？",
+                        card_answer=content.strip(),
+                        topic_names=["迁移治理"],
+                        evidence_quotes=[content.strip()],
+                        age_path=self.age,
+                    )
+                )
+        topic_views = list((target / "knowledge" / "wiki" / "topics").glob("*.md"))
+        self.assertEqual(1, len(topic_views))
+        latest_topic_id = imports[-1]["compilation"]["topic_pages"][0]["object_id"]
+        latest_content = topic_views[0].read_text(encoding="utf-8")
+        self.assertIn(imports[0]["compilation"]["atomic_card_id"], latest_content)
+        self.assertIn(imports[1]["compilation"]["atomic_card_id"], latest_content)
+        self.assertIn(latest_topic_id, latest_content)
+        audit = workspace_completion_audit(target, age_path=self.age)
+        self.assertNotIn("semantic-compilation-quality-failed", audit["issues"])
+        self.assertEqual([], audit["semantic_issues"])
+
     def test_workspace_import_is_bound_to_confirmation_evidence_and_live_source(self) -> None:
         if not self.age:
             self.skipTest("set KB_TEST_AGE or install age")
@@ -764,6 +875,16 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 "evidence_quotes": [first_evidence, second_evidence],
                 "age_path": self.age,
             }
+            with self.assertRaisesRegex(KBError, "damaged or replacement characters"):
+                import_workspace_candidate(
+                    **{
+                        **common,
+                        "summary": f"???????? {first_evidence} {second_evidence}",
+                    }
+                )
+            self.assertFalse(
+                any((target / ".atlas" / "runtime" / "vault" / "core" / "raw").glob("*.age"))
+            )
             with self.assertRaisesRegex(KBError, "differ from the confirmed decision"):
                 import_workspace_candidate(**{**common, "rights": "restricted"})
             with self.assertRaisesRegex(KBError, "grounded source excerpt"):
@@ -794,6 +915,17 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual("knowledge", candidate["intended_role"])
         self.assertEqual(receipt, candidate["confirmation_id"])
         self.assertEqual(2, len(candidate["semantic_evidence"]))
+        vault = KnowledgeVault(resolve_knowledge_root(target), age_path=self.age)
+        local_identities = {
+            tier: resolve_knowledge_root(target) / ".local" / "test-keys" / f"{tier}.identity"
+            for tier in ("basic", "advanced", "core")
+        }
+        for object_id in candidate["wiki_object_ids"]:
+            envelope = vault._read_object_path(
+                vault._locate_object(object_id),
+                local_identities,
+            )
+            self.assertEqual("owned", envelope["rights"])
         audit_before_selection = workspace_completion_audit(target)
         self.assertIn(
             "source-materials-disposition-pending", audit_before_selection["issues"]
@@ -808,6 +940,15 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual(
             ["questions/late-note.md"], audit_after_change["new_or_changed_source_paths"]
         )
+        recovery = target / ".atlas" / "runtime" / ".local" / "recovery" / "stale-test"
+        recovery.mkdir(parents=True)
+        (recovery / "manifest.json").write_text("{}\n", encoding="utf-8")
+        audit_with_recovery = workspace_completion_audit(target)
+        self.assertIn(
+            "runtime-recovery-residuals-remain",
+            audit_with_recovery["issues"],
+        )
+        self.assertEqual(1, len(audit_with_recovery["recovery_residuals"]))
 
     def test_workspace_source_delete_keeps_local_git_snapshot_and_raw(self) -> None:
         if not self.age:

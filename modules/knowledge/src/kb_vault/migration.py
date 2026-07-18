@@ -20,7 +20,12 @@ from .bootstrap import (
     is_personal_domain_root,
     resolve_knowledge_root,
 )
-from .core import KBError, KnowledgeVault, stable_token
+from .core import KBError, PRIVATE_TIERS, KnowledgeVault, stable_token
+from .compiler_quality import (
+    normalize_topic_names,
+    validate_candidate_payload,
+    validate_generated_text,
+)
 from .io_utils import atomic_replace
 from .github_onboarding import GitHubCLIEnvironment, configured_repository
 from .workspace_views import materialize_workspace_views
@@ -1522,6 +1527,41 @@ def record_migration_candidate(
     raw = vault._read_object_path(raw_path, identities)
     if raw.get("object_kind") != "raw" or str(raw.get("content")) != staged_content:
         raise KBError("migration raw object does not preserve the staged source")
+    expected_responsibility = dict(responsibility or {})
+    confirmation = selected.get("confirmation")
+    if not expected_responsibility and isinstance(confirmation, Mapping):
+        fields = confirmation.get("fields")
+        if isinstance(fields, Mapping):
+            expected_responsibility = {
+                key: str(value)
+                for key, value in fields.items()
+                if key in {
+                    "access",
+                    "rights",
+                    "origin_kind",
+                    "authorship_status",
+                    "intended_role",
+                }
+            }
+    if expected_responsibility:
+        raw_classification = raw.get("classification")
+        raw_access = (
+            str(raw_classification.get("level"))
+            if isinstance(raw_classification, Mapping)
+            else str(raw.get("tier"))
+        )
+        raw_actual = {
+            "access": raw_access,
+            "rights": str(raw.get("rights")),
+            "origin_kind": str(raw.get("origin_kind")),
+            "authorship_status": str(raw.get("authorship_status")),
+            "intended_role": str(raw.get("intended_role")),
+        }
+        if any(
+            raw_actual.get(key) != value
+            for key, value in expected_responsibility.items()
+        ):
+            raise KBError("migration raw metadata differs from the confirmed responsibility")
     wiki_kinds: set[str] = set()
     verified_wiki_ids: list[str] = []
     view_envelopes: list[Mapping[str, Any]] = [raw]
@@ -1536,6 +1576,60 @@ def record_migration_candidate(
         }
         if raw_object_id not in sources:
             raise KBError("migration wiki object is not traceable to the raw source")
+        wiki_kind = str(envelope.get("wiki_kind"))
+        if wiki_kind == "source_summary":
+            validate_generated_text(
+                str(envelope.get("content", "")),
+                label="migration Wiki source summary",
+                minimum_alnum=12,
+            )
+        elif wiki_kind == "atomic_card":
+            validate_generated_text(
+                str(envelope.get("title", "")),
+                label="migration Wiki atomic-card question",
+                minimum_alnum=4,
+            )
+            validate_generated_text(
+                str(envelope.get("content", "")),
+                label="migration Wiki atomic-card content",
+                minimum_alnum=8,
+            )
+        elif wiki_kind == "topic_page":
+            validate_generated_text(
+                str(envelope.get("title", "")),
+                label="migration Wiki topic title",
+                minimum_alnum=2,
+            )
+            validate_generated_text(
+                str(envelope.get("content", "")),
+                label="migration Wiki topic content",
+                minimum_alnum=4,
+            )
+            if len(envelope.get("topic_ids", [])) != 1:
+                raise KBError("migration Wiki topic page requires one stable topic id")
+        if expected_responsibility:
+            expected_access = expected_responsibility.get("access", "")
+            expected_wiki_access = "basic" if expected_access == "public" else expected_access
+            classification = envelope.get("classification")
+            wiki_access = (
+                str(classification.get("level"))
+                if isinstance(classification, Mapping)
+                else str(envelope.get("tier"))
+            )
+            if expected_wiki_access and wiki_access != expected_wiki_access:
+                raise KBError("migration Wiki classification differs from the confirmed access")
+            rights_match = envelope.get("rights") == expected_responsibility.get("rights")
+            if wiki_kind == "topic_page" and envelope.get("rights") == "restricted":
+                rights_match = True
+            if not rights_match:
+                raise KBError("migration Wiki rights differ from the confirmed responsibility")
+            origin_match = envelope.get("origin_kind") == expected_responsibility.get("origin_kind")
+            if wiki_kind == "topic_page" and envelope.get("origin_kind") == "mixed":
+                origin_match = True
+            if not origin_match:
+                raise KBError("migration Wiki origin differs from the confirmed responsibility")
+            if envelope.get("intended_role") != "knowledge":
+                raise KBError("migration Wiki intended role must remain knowledge")
         wiki_kinds.add(str(envelope.get("wiki_kind")))
         verified_wiki_ids.append(object_id)
         view_envelopes.append(envelope)
@@ -1779,6 +1873,12 @@ def _normalized_excerpt(value: str) -> str:
 def _validate_semantic_evidence(
     *, content: str, summary: str, card_question: str, card_answer: str, evidence_quotes: Iterable[str]
 ) -> list[str]:
+    validate_candidate_payload(
+        summary=summary,
+        card_question=card_question,
+        card_answer=card_answer,
+        topic_names=("evidence-validation",),
+    )
     source = _normalized_excerpt(content)
     generated = _normalized_excerpt("\n".join((summary, card_question, card_answer)))
     retained: list[str] = []
@@ -1797,6 +1897,46 @@ def _validate_semantic_evidence(
     if len(retained) < required:
         raise KBError(f"workspace Wiki import requires at least {required} grounded source excerpt(s)")
     return retained
+
+
+def _effective_workspace_identities(
+    knowledge_root: Path,
+    supplied: Mapping[str, str | Path] | None,
+) -> dict[str, str | Path]:
+    effective: dict[str, str | Path] = dict(supplied or {})
+    for tier in PRIVATE_TIERS:
+        if tier in effective:
+            continue
+        configured = os.environ.get(f"KB_AGE_IDENTITY_{tier.upper()}_FILE", "").strip()
+        candidates = [
+            Path(configured).expanduser() if configured else None,
+            knowledge_root / ".local" / "test-keys" / f"{tier}.identity",
+        ]
+        identity = next(
+            (candidate.resolve() for candidate in candidates if candidate and candidate.is_file()),
+            None,
+        )
+        if identity is not None:
+            effective[tier] = identity
+    return effective
+
+
+def _preflight_workspace_crypto(
+    vault: KnowledgeVault,
+    *,
+    required_tiers: Iterable[str],
+    identities: Mapping[str, str | Path],
+    recipients: Mapping[str, str] | None,
+) -> None:
+    for tier in dict.fromkeys(required_tiers):
+        if tier not in PRIVATE_TIERS:
+            continue
+        identity = identities.get(tier)
+        if identity is None:
+            raise KBError(f"workspace import requires the {tier} identity before writing")
+        expected_recipient = vault.recipient_for(tier, recipients)
+        if vault.identity_recipient(identity) != expected_recipient:
+            raise KBError(f"workspace import {tier} identity does not match its recipient")
 
 
 def import_workspace_candidate(
@@ -1831,7 +1971,7 @@ def import_workspace_candidate(
         authorship_status=authorship_status,
         intended_role=intended_role,
     )
-    topics = [value.strip() for value in topic_names if value.strip()]
+    topics = normalize_topic_names(topic_names)
     knowledge_candidate = intended_role in ("knowledge", "evidence")
     if knowledge_candidate and raw_only and not confirm_raw_only:
         raise KBError("raw-only workspace import requires explicit confirmation")
@@ -1882,6 +2022,12 @@ def import_workspace_candidate(
         raise KBError("workspace candidate source changed after staging; review the new version")
     grounded_evidence: list[str] = []
     if knowledge_candidate and not raw_only:
+        summary, card_question, card_answer, topics = validate_candidate_payload(
+            summary=summary,
+            card_question=card_question,
+            card_answer=card_answer,
+            topic_names=topics,
+        )
         grounded_evidence = _validate_semantic_evidence(
             content=content,
             summary=summary,
@@ -1891,25 +2037,7 @@ def import_workspace_candidate(
         )
 
     knowledge_root = resolve_knowledge_root(target_root)
-    effective_identities = dict(identities or {})
-    for tier in ("basic", "advanced", "core"):
-        if tier in effective_identities:
-            continue
-        configured = os.environ.get(f"KB_AGE_IDENTITY_{tier.upper()}_FILE", "").strip()
-        identity_candidates = [
-            Path(configured).expanduser() if configured else None,
-            knowledge_root / ".local" / "test-keys" / f"{tier}.identity",
-        ]
-        selected_identity = next(
-            (
-                candidate.resolve()
-                for candidate in identity_candidates
-                if candidate and candidate.is_file()
-            ),
-            None,
-        )
-        if selected_identity is not None:
-            effective_identities[tier] = selected_identity
+    effective_identities = _effective_workspace_identities(knowledge_root, identities)
     vault = KnowledgeVault(knowledge_root, age_path=age_path)
     if intended_role not in ("knowledge", "evidence"):
         if not confirm_route_outside_knowledge:
@@ -1991,6 +2119,15 @@ def import_workspace_candidate(
             "retirement_required": False,
             "source_materials_selection_required": not pending,
         }
+    required_tiers = [access]
+    if not raw_only and access == "public":
+        required_tiers.append("basic")
+    _preflight_workspace_crypto(
+        vault,
+        required_tiers=required_tiers,
+        identities=effective_identities,
+        recipients=recipients,
+    )
     request_seed = f"workspace-import:{state.get('source_fingerprint', '')}:{source_path}"
     request_id = stable_token("req", request_seed)
     raw_receipt = vault.add(
@@ -2229,7 +2366,192 @@ def dispose_workspace_source_materials(
     }
 
 
-def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
+def _workspace_recovery_residuals(target_root: Path) -> list[str]:
+    recovery_root = target_root / ".atlas" / "runtime" / ".local" / "recovery"
+    if not recovery_root.is_dir():
+        return []
+    return sorted(
+        path.relative_to(target_root).as_posix()
+        for path in recovery_root.rglob("*")
+        if path.is_file()
+    )
+
+
+def _workspace_semantic_quality_audit(
+    target_root: Path,
+    state: Mapping[str, Any],
+    *,
+    identities: Mapping[str, str | Path] | None,
+    age_path: str | Path | None,
+) -> list[dict[str, str]]:
+    candidates = state.get("semantic_candidates")
+    if not isinstance(candidates, list):
+        return [{"source_path": "", "issue": "semantic-candidate-list-unavailable"}]
+    knowledge_root = resolve_knowledge_root(target_root)
+    effective_identities = _effective_workspace_identities(knowledge_root, identities)
+    vault = KnowledgeVault(knowledge_root, age_path=age_path)
+    details: list[dict[str, str]] = []
+    expected_cards_by_topic: dict[tuple[str, str], set[str]] = {}
+    topic_pages_by_topic: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping) or candidate.get("status") != "completed":
+            continue
+        source_path = str(candidate.get("path", ""))
+        confirmation = candidate.get("confirmation")
+        fields = confirmation.get("fields") if isinstance(confirmation, Mapping) else None
+        expected = dict(fields) if isinstance(fields, Mapping) else {}
+        try:
+            raw_id = str(candidate.get("raw_object_id", ""))
+            raw = vault._read_object_path(vault._locate_object(raw_id), effective_identities)
+            wiki_objects = [
+                vault._read_object_path(vault._locate_object(str(object_id)), effective_identities)
+                for object_id in candidate.get("wiki_object_ids", [])
+            ]
+        except KBError as exc:
+            details.append(
+                {"source_path": source_path, "issue": "semantic-object-unreadable", "detail": str(exc)}
+            )
+            continue
+        if expected:
+            classification = raw.get("classification")
+            raw_access = (
+                str(classification.get("level"))
+                if isinstance(classification, Mapping)
+                else str(raw.get("tier"))
+            )
+            raw_checks = {
+                "access": raw_access,
+                "rights": str(raw.get("rights")),
+                "origin_kind": str(raw.get("origin_kind")),
+                "authorship_status": str(raw.get("authorship_status")),
+                "intended_role": str(raw.get("intended_role")),
+            }
+            if any(
+                str(expected.get(key, "")) != value
+                for key, value in raw_checks.items()
+                if key in expected
+            ):
+                details.append(
+                    {"source_path": source_path, "issue": "raw-confirmation-metadata-mismatch"}
+                )
+        card_ids = [
+            str(item.get("object_id"))
+            for item in wiki_objects
+            if item.get("wiki_kind") == "atomic_card"
+        ]
+        for envelope in wiki_objects:
+            wiki_kind = str(envelope.get("wiki_kind", ""))
+            try:
+                if wiki_kind == "source_summary":
+                    validate_generated_text(
+                        str(envelope.get("content", "")),
+                        label="migration Wiki source summary",
+                        minimum_alnum=12,
+                    )
+                elif wiki_kind == "atomic_card":
+                    validate_generated_text(
+                        str(envelope.get("title", "")),
+                        label="migration Wiki atomic-card question",
+                        minimum_alnum=4,
+                    )
+                    validate_generated_text(
+                        str(envelope.get("content", "")),
+                        label="migration Wiki atomic-card content",
+                        minimum_alnum=8,
+                    )
+                elif wiki_kind == "topic_page":
+                    validate_generated_text(
+                        str(envelope.get("title", "")),
+                        label="migration Wiki topic title",
+                        minimum_alnum=2,
+                    )
+                    validate_generated_text(
+                        str(envelope.get("content", "")),
+                        label="migration Wiki topic content",
+                        minimum_alnum=4,
+                    )
+                    topic_ids = [str(value) for value in envelope.get("topic_ids", [])]
+                    if len(topic_ids) != 1:
+                        raise KBError("migration Wiki topic page requires one stable topic id")
+                    classification = envelope.get("classification")
+                    topic_access = (
+                        str(classification.get("level"))
+                        if isinstance(classification, Mapping)
+                        else str(envelope.get("tier"))
+                    )
+                    topic_key = (topic_ids[0], topic_access)
+                    topic_pages_by_topic.setdefault(topic_key, []).append(envelope)
+                    for card_id in card_ids:
+                        expected_cards_by_topic.setdefault(topic_key, set()).add(card_id)
+            except KBError as exc:
+                details.append(
+                    {
+                        "source_path": source_path,
+                        "issue": "generated-wiki-text-invalid",
+                        "detail": str(exc),
+                    }
+                )
+            if expected:
+                expected_access = str(expected.get("access", ""))
+                expected_wiki_access = "basic" if expected_access == "public" else expected_access
+                classification = envelope.get("classification")
+                wiki_access = (
+                    str(classification.get("level"))
+                    if isinstance(classification, Mapping)
+                    else str(envelope.get("tier"))
+                )
+                rights_match = envelope.get("rights") == expected.get("rights")
+                if wiki_kind == "topic_page" and envelope.get("rights") == "restricted":
+                    rights_match = True
+                origin_match = envelope.get("origin_kind") == expected.get("origin_kind")
+                if wiki_kind == "topic_page" and envelope.get("origin_kind") == "mixed":
+                    origin_match = True
+                if (
+                    not rights_match
+                    or not origin_match
+                    or (expected_wiki_access and wiki_access != expected_wiki_access)
+                ):
+                    details.append(
+                        {"source_path": source_path, "issue": "wiki-confirmation-metadata-mismatch"}
+                    )
+    for topic_key, expected_cards in expected_cards_by_topic.items():
+        topic_id, topic_access = topic_key
+        pages = topic_pages_by_topic.get(topic_key, [])
+        if not pages:
+            details.append(
+                {
+                    "source_path": "",
+                    "issue": "topic-page-missing",
+                    "detail": f"{topic_id}:{topic_access}",
+                }
+            )
+            continue
+        latest = max(
+            pages,
+            key=lambda item: (str(item.get("updated_at", "")), str(item.get("object_id", ""))),
+        )
+        included = {
+            str(relation.get("target_id"))
+            for relation in latest.get("relations", [])
+            if relation.get("type") == "supports"
+        }
+        if not expected_cards.issubset(included):
+            details.append(
+                {
+                    "source_path": "",
+                    "issue": "topic-page-not-aggregated",
+                    "detail": f"{topic_id}:{topic_access}",
+                }
+            )
+    return details
+
+
+def workspace_completion_audit(
+    target: str | Path,
+    *,
+    identities: Mapping[str, str | Path] | None = None,
+    age_path: str | Path | None = None,
+) -> dict[str, Any]:
     """Prove that semantic review is current immediately before a completion report."""
     target_root = Path(target).expanduser().resolve()
     state = _read_json(target_root / MIGRATION_STATE)
@@ -2266,6 +2588,18 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
             for path in reference.glob("17deg-atlas.residual-*")
             if path.exists()
         )
+    recovery_residuals = _workspace_recovery_residuals(target_root)
+    semantic_issues = _workspace_semantic_quality_audit(
+        target_root,
+        state,
+        identities=identities,
+        age_path=age_path,
+    )
+    semantic_issue_counts: dict[str, int] = {}
+    for item in semantic_issues:
+        issue = str(item.get("issue", "unknown"))
+        semantic_issue_counts[issue] = semantic_issue_counts.get(issue, 0) + 1
+    semantic_issue_samples = semantic_issues[:20]
     git_clean = True
     git_synced = False
     local_commit = ""
@@ -2295,6 +2629,10 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
         issues.append("source-materials-changed-after-review")
     if residuals:
         issues.append("runtime-install-residuals-remain")
+    if recovery_residuals:
+        issues.append("runtime-recovery-residuals-remain")
+    if semantic_issues:
+        issues.append("semantic-compilation-quality-failed")
     if not git_clean:
         issues.append("workspace-git-is-dirty")
     if not git_synced:
@@ -2307,6 +2645,10 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
             "pending": pending,
             "staging_residuals": staging_residuals,
             "source_materials_disposition": state.get("source_materials_disposition"),
+            "recovery_residuals": recovery_residuals,
+            "semantic_issue_count": len(semantic_issues),
+            "semantic_issue_counts": semantic_issue_counts,
+            "semantic_issue_samples": semantic_issue_samples,
             "issues": issues,
         },
         sort_keys=True,
@@ -2324,6 +2666,10 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
         "new_or_changed_source_count": live_plan["candidate_count"],
         "new_or_changed_source_paths": live_plan["sample_paths"],
         "install_residuals": residuals,
+        "recovery_residuals": recovery_residuals,
+        "semantic_issue_count": len(semantic_issues),
+        "semantic_issue_counts": semantic_issue_counts,
+        "semantic_issues": semantic_issue_samples,
         "git_clean": git_clean,
         "git_synced": git_synced,
         "local_commit": local_commit,

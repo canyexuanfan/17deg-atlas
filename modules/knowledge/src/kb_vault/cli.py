@@ -112,7 +112,7 @@ def identities(args: argparse.Namespace) -> dict[str, Path]:
     }
     if explicit:
         return explicit
-    root = getattr(args, "root", None)
+    root = getattr(args, "root", None) or getattr(args, "target", None)
     return discover_identities(root or resolve_workspace())
 
 
@@ -136,6 +136,39 @@ def write_tier(args: argparse.Namespace) -> str:
     if not tier:
         raise KBError("provide --access or legacy --tier")
     return str(tier)
+
+
+def _load_workspace_import_payload(path: Path | None) -> dict[str, object]:
+    if path is None:
+        return {}
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise KBError("workspace import payload file does not exist")
+    if resolved.stat().st_size > 1024 * 1024:
+        raise KBError("workspace import payload file is too large")
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise KBError("workspace import payload must be valid UTF-8 JSON") from exc
+    if not isinstance(payload, dict):
+        raise KBError("workspace import payload must be a JSON object")
+    allowed = {
+        "summary",
+        "card_question",
+        "card_answer",
+        "topic_names",
+        "evidence_quotes",
+    }
+    if set(payload) - allowed:
+        raise KBError("workspace import payload contains unsupported fields")
+    for field in ("summary", "card_question", "card_answer"):
+        if not isinstance(payload.get(field), str):
+            raise KBError(f"workspace import payload {field} must be a string")
+    for field in ("topic_names", "evidence_quotes"):
+        value = payload.get(field)
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise KBError(f"workspace import payload {field} must be a string list")
+    return payload
 
 
 def content_value(args: argparse.Namespace) -> str:
@@ -288,6 +321,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workspace_import_parser.add_argument("--topic", action="append", default=[])
     workspace_import_parser.add_argument("--evidence", action="append", default=[])
+    workspace_import_parser.add_argument(
+        "--payload-file",
+        type=Path,
+        help="read generated Wiki text from one UTF-8 JSON file",
+    )
     workspace_import_parser.add_argument("--raw-only", action="store_true")
     workspace_import_parser.add_argument("--confirm-raw-only", action="store_true")
     workspace_import_parser.add_argument(
@@ -320,6 +358,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="verify current source, semantic review, installation and Git sync state",
     )
     workspace_completion_parser.add_argument("--target", type=Path, required=True)
+    add_identity_args(workspace_completion_parser)
 
     workspace_source_plan_parser = sub.add_parser(
         "agent-workspace-source-plan",
@@ -1069,6 +1108,19 @@ def execute(args: argparse.Namespace) -> object:
             age_path=args.age_path,
         )
     if args.command == "agent-workspace-import":
+        payload = _load_workspace_import_payload(args.payload_file)
+        if payload and any(
+            (
+                args.summary,
+                args.card_question,
+                args.card_answer,
+                args.topic,
+                args.evidence,
+            )
+        ):
+            raise KBError(
+                "workspace import payload file cannot be mixed with generated-text arguments"
+            )
         return import_workspace_candidate(
             args.target,
             source_path=args.source_path,
@@ -1079,12 +1131,12 @@ def execute(args: argparse.Namespace) -> object:
             authorship_status=args.authorship_status,
             intended_role=args.intended_role or "unknown",
             title=args.title,
-            summary=args.summary,
-            card_question=args.card_question,
-            card_answer=args.card_answer,
+            summary=str(payload.get("summary", args.summary)),
+            card_question=str(payload.get("card_question", args.card_question)),
+            card_answer=str(payload.get("card_answer", args.card_answer)),
             card_kind=args.card_kind,
-            topic_names=args.topic,
-            evidence_quotes=args.evidence,
+            topic_names=payload.get("topic_names", args.topic),
+            evidence_quotes=payload.get("evidence_quotes", args.evidence),
             raw_only=args.raw_only,
             confirm_raw_only=args.confirm_raw_only,
             confirm_route_outside_knowledge=args.confirm_route_outside_knowledge,
@@ -1105,7 +1157,11 @@ def execute(args: argparse.Namespace) -> object:
             confirm_semantic_decision=args.confirm_semantic_decision,
         )
     if args.command == "agent-workspace-completion-audit":
-        return workspace_completion_audit(args.target)
+        return workspace_completion_audit(
+            args.target,
+            identities=identities(args),
+            age_path=args.age_path,
+        )
     if args.command == "agent-workspace-source-plan":
         return workspace_source_materials_plan(args.target)
     if args.command == "agent-workspace-source-start":

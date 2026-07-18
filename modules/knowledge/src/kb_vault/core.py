@@ -225,6 +225,9 @@ class KnowledgeVault:
             input_bytes=ciphertext,
         )
         if result.returncode != 0:
+            error = result.stderr.decode("utf-8", errors="replace").casefold()
+            if "access is denied" in error or "permission denied" in error:
+                raise KBError("identity file cannot be read with the current process permissions")
             raise KBError("identity is not authorized for this object")
         return result.stdout
 
@@ -514,6 +517,9 @@ class KnowledgeVault:
         if existing != fingerprint:
             raise ConflictError("request_id was already used with different content")
         replay = copy.deepcopy(receipt)
+        object_ids = replay.get("object_ids")
+        if isinstance(object_ids, list) and len(object_ids) == 1:
+            replay["object_id"] = object_ids[0]
         replay["idempotent_replay"] = True
         return replay
 

@@ -126,6 +126,12 @@ def _relative_view(envelope: Mapping[str, Any]) -> Path | None:
         return Path("knowledge") / "raw" / directory / filename
     wiki_kind = str(envelope.get("wiki_kind", ""))
     directory = WIKI_DIRECTORIES.get(wiki_kind, "other")
+    if wiki_kind == "topic_page":
+        topic_ids = _source_values(envelope, "topic_ids")
+        if topic_ids:
+            # A derived topic page is one rebuildable human view per stable topic,
+            # even though immutable candidate versions remain in the object store.
+            filename = _safe_name(str(envelope.get("title", "")), topic_ids[0])
     return Path("knowledge") / stage / directory / filename
 
 

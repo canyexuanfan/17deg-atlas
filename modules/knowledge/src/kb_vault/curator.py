@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .core import KBError, PRIVATE_TIERS, KnowledgeVault, canonical_json, sha256_text, stable_token
+from .compiler_quality import normalize_topic_names, validate_generated_text
 from .model import CLASSIFICATION_RANK, highest_classification_level
 
 
@@ -306,6 +307,45 @@ class KnowledgeCurator:
         return raws
 
     @staticmethod
+    def _derived_rights(objects: Iterable[Mapping[str, Any]]) -> str:
+        rights = {str(item.get("rights", "unknown")) for item in objects}
+        if len(rights) == 1:
+            return next(iter(rights))
+        if "restricted" in rights:
+            return "restricted"
+        if "unknown" in rights:
+            return "unknown"
+        # Combining owned and licensed material needs a fresh rights review.
+        return "restricted"
+
+    def _latest_topic_page(
+        self,
+        topic_id: str,
+        classification: str,
+        identities: Mapping[str, str | Path] | None,
+    ) -> dict[str, Any] | None:
+        pages = [
+            item
+            for item in self._accessible_envelopes(identities)
+            if item.get("object_kind") == "wiki"
+            and item.get("wiki_kind") == "topic_page"
+            and topic_id in item.get("topic_ids", [])
+            and item.get("lifecycle") not in ("revoked",)
+            and (
+                item.get("classification", {}).get("level")
+                if isinstance(item.get("classification"), Mapping)
+                else item.get("tier")
+            )
+            == classification
+        ]
+        if not pages:
+            return None
+        return max(
+            pages,
+            key=lambda item: (str(item.get("updated_at", "")), str(item.get("object_id", ""))),
+        )
+
+    @staticmethod
     def _summary_text(raws: list[Mapping[str, Any]], supplied: str) -> str:
         if supplied.strip():
             return supplied.strip()
@@ -356,8 +396,14 @@ class KnowledgeCurator:
         raw_ids = [item["object_id"] for item in raws]
         title = str(raws[0]["title"])
         summary_text = self._summary_text(raws, summary)
+        summary_text = validate_generated_text(
+            summary_text,
+            label="Wiki source summary",
+            minimum_alnum=12,
+        )
         raw_origins = {str(item.get("origin_kind", "unknown")) for item in raws}
         compiled_origin = next(iter(raw_origins)) if len(raw_origins) == 1 else "mixed"
+        compiled_rights = self._derived_rights(raws)
         compiled_clarification = (
             "required"
             if any(
@@ -365,10 +411,16 @@ class KnowledgeCurator:
                 or item.get("rights") == "unknown"
                 for item in raws
             )
+            else "answered"
+            if all(item.get("clarification_status") == "answered" for item in raws)
             else "not_needed"
         )
-        topics = [name.strip() for name in topic_names if name.strip()]
+        topics = normalize_topic_names(topic_names)
         topic_ids = [stable_token("topic", name.casefold()) for name in topics]
+        existing_topic_pages = {
+            topic_id: self._latest_topic_page(topic_id, candidate_tier, identities)
+            for topic_id in topic_ids
+        }
         superseded: dict[str, Any] | None = None
         if supersedes_object_id:
             superseded = self.vault._read_object_path(
@@ -408,7 +460,7 @@ class KnowledgeCurator:
             summary=summary_text,
             content=summary_text,
             source_ids=raw_ids,
-            rights="restricted" if any(item["rights"] == "restricted" for item in raws) else "unknown",
+            rights=compiled_rights,
             maturity="draft",
             catalog_visibility="none",
             wiki_kind="source_summary",
@@ -429,6 +481,16 @@ class KnowledgeCurator:
         answer = card_answer.strip() or summary_text
         if not question.endswith(("？", "?")):
             question += "？"
+        question = validate_generated_text(
+            question,
+            label="Wiki atomic-card question",
+            minimum_alnum=4,
+        )
+        answer = validate_generated_text(
+            answer,
+            label="Wiki atomic-card answer",
+            minimum_alnum=8,
+        )
         card_request = f"{request_id}:card"
         card_object_id = stable_token("obj", f"{card_request}:wiki")
         card_relations = [self._relation(
@@ -457,7 +519,7 @@ class KnowledgeCurator:
             summary=answer[:240],
             content=f"## 问题\n\n{question}\n\n## 候选回答\n\n{answer}",
             source_ids=[summary_object_id, *raw_ids],
-            rights="restricted" if any(item["rights"] == "restricted" for item in raws) else "unknown",
+            rights=compiled_rights,
             maturity="draft",
             catalog_visibility="none",
             wiki_kind="atomic_card",
@@ -479,33 +541,100 @@ class KnowledgeCurator:
         for index, (topic_name, topic_id) in enumerate(zip(topics, topic_ids, strict=True)):
             topic_request = f"{request_id}:topic:{index}"
             topic_object_id = stable_token("obj", f"{topic_request}:wiki")
-            topic_relations = [self._relation(
-                relation_seed=f"{topic_object_id}:includes:{card_object_id}",
-                relation_type="supports",
-                target_id=card_object_id,
-                statement="该卡片是此主题页的候选组成部分，关系尚待审核。",
-                evidence_ids=raw_ids,
-            )]
-            if superseded and superseded.get("wiki_kind") == "topic_page":
+            previous_topic = existing_topic_pages.get(topic_id)
+            previous_card_ids: list[str] = []
+            if previous_topic:
+                previous_card_ids = [
+                    str(relation.get("target_id"))
+                    for relation in previous_topic.get("relations", [])
+                    if relation.get("type") == "supports"
+                    and str(relation.get("target_id", "")).startswith("obj_")
+                ]
+            card_ids = list(dict.fromkeys([*previous_card_ids, card_object_id]))
+            topic_sources = list(
+                dict.fromkeys(
+                    [
+                        *card_ids,
+                        summary_object_id,
+                        *raw_ids,
+                        *(
+                            [str(previous_topic["object_id"])]
+                            if previous_topic
+                            else []
+                        ),
+                    ]
+                )
+            )
+            topic_raw_refs = list(
+                dict.fromkeys(
+                    [
+                        *(
+                            [str(value) for value in previous_topic.get("source_refs", [])]
+                            if previous_topic
+                            else []
+                        ),
+                        *raw_ids,
+                    ]
+                )
+            )
+            topic_relations = [
+                self._relation(
+                    relation_seed=f"{topic_object_id}:includes:{candidate_card_id}",
+                    relation_type="supports",
+                    target_id=candidate_card_id,
+                    statement="该卡片是此主题页的候选组成部分，关系尚待审核。",
+                    evidence_ids=topic_raw_refs,
+                )
+                for candidate_card_id in card_ids
+            ]
+            replaced_topic = previous_topic or (
+                superseded if superseded and superseded.get("wiki_kind") == "topic_page" else None
+            )
+            if replaced_topic:
                 topic_relations.append(
                     self._relation(
-                        relation_seed=f"{topic_object_id}:supersedes:{supersedes_object_id}",
+                        relation_seed=f"{topic_object_id}:supersedes:{replaced_topic['object_id']}",
                         relation_type="supersedes",
-                        target_id=supersedes_object_id,
-                        statement="该重新编译候选拟替代旧主题页；旧对象继续保留，尚待审核。",
-                        evidence_ids=raw_ids,
+                        target_id=str(replaced_topic["object_id"]),
+                        statement="该聚合候选拟替代旧主题页投影；旧对象继续保留，尚待审核。",
+                        evidence_ids=topic_raw_refs,
                     )
                 )
+            topic_objects: list[Mapping[str, Any]] = [*raws]
+            if previous_topic:
+                topic_objects.append(previous_topic)
+            topic_tier = highest_classification_level(topic_objects)
+            if CLASSIFICATION_RANK[topic_tier] < CLASSIFICATION_RANK["basic"]:
+                topic_tier = "basic"
+            topic_rights = self._derived_rights(topic_objects)
+            topic_origins = {
+                str(item.get("origin_kind", "unknown")) for item in topic_objects
+            }
+            topic_origin = next(iter(topic_origins)) if len(topic_origins) == 1 else "mixed"
+            topic_clarification = (
+                "required"
+                if any(
+                    item.get("clarification_status") == "required"
+                    or item.get("rights") == "unknown"
+                    for item in topic_objects
+                )
+                else "answered"
+                if all(item.get("clarification_status") == "answered" for item in topic_objects)
+                else "not_needed"
+            )
+            topic_content = "# " + topic_name + "\n\n候选卡片：\n" + "\n".join(
+                f"- {candidate_card_id}" for candidate_card_id in card_ids
+            )
             topic_receipt = self.vault.add(
                 request_id=topic_request,
                 object_id=topic_object_id,
-                tier=candidate_tier,
+                tier=topic_tier,
                 kind="wiki",
                 title=f"{topic_name}：主题页候选",
-                summary="自动生成的候选主题入口，尚未成为正式 taxonomy。",
-                content=f"# {topic_name}\n\n候选卡片：{card_object_id}",
-                source_ids=[card_object_id, summary_object_id, *raw_ids],
-                rights="restricted" if any(item["rights"] == "restricted" for item in raws) else "unknown",
+                summary=f"自动聚合 {len(card_ids)} 张候选卡片的主题入口，尚未成为正式 taxonomy。",
+                content=topic_content,
+                source_ids=topic_sources,
+                rights=topic_rights,
                 maturity="draft",
                 catalog_visibility="none",
                 wiki_kind="topic_page",
@@ -513,21 +642,31 @@ class KnowledgeCurator:
                 relations=topic_relations,
                 compile_state="compiled",
                 review_state="candidate",
-                origin_kind=compiled_origin,
+                origin_kind=topic_origin,
                 authorship_status="ai_assisted",
-                source_refs=raw_ids,
+                source_refs=topic_raw_refs,
                 intended_role="knowledge",
-                clarification_status=compiled_clarification,
+                clarification_status=topic_clarification,
                 recipients=recipients,
                 action="curate-topic",
             )
-            topic_pages.append({"topic_id": topic_id, "object_id": topic_receipt["object_id"]})
+            topic_pages.append(
+                {
+                    "topic_id": topic_id,
+                    "object_id": topic_receipt["object_id"],
+                    "supersedes_object_id": (
+                        str(replaced_topic["object_id"]) if replaced_topic else ""
+                    ),
+                }
+            )
 
         from .cycle import KnowledgeCycle
 
         cycle = KnowledgeCycle(self.vault)
         taxonomy_proposals: list[dict[str, str]] = []
         for index, (topic_name, topic_page) in enumerate(zip(topics, topic_pages, strict=True)):
+            if existing_topic_pages.get(topic_page["topic_id"]):
+                continue
             proposal = cycle.propose_topic(
                 request_id=f"{request_id}:taxonomy:{index}",
                 name=topic_name,
