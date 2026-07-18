@@ -227,8 +227,8 @@ class InstanceMigrationAcceptanceTests(unittest.TestCase):
         self.assertTrue(root.is_dir())
         current_knowledge = resolve_knowledge_root(target)
         self.assertEqual(target / ".atlas" / "runtime", current_knowledge)
-        self.assertTrue(
-            (target / "knowledge" / "inbox" / "migration" / "docs" / "existing-note.md").is_file()
+        self.assertFalse(
+            (target / "knowledge" / "inbox" / "migration" / "docs" / "existing-note.md").exists()
         )
         identities = {
             tier: current_knowledge / ".local" / "test-keys" / f"{tier}.identity"
@@ -581,6 +581,8 @@ class InstanceMigrationAcceptanceTests(unittest.TestCase):
         self.assertEqual(0, help_result.returncode, help_result.stderr)
         self.assertIn("migration-plan", help_result.stdout)
         self.assertIn("migration-review", help_result.stdout)
+        self.assertIn("source-plan", help_result.stdout)
+        self.assertIn("source-start", help_result.stdout)
         self.assertIn("retirement-start", help_result.stdout)
 
     def test_m07_verified_migration_can_complete_github_first_onboarding(self) -> None:

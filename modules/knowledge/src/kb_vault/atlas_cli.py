@@ -21,6 +21,8 @@ WORKSPACE_ACTIONS = {
     "import-review": "agent-workspace-import",
     "confirm-review": "agent-workspace-confirm",
     "completion-audit": "agent-workspace-completion-audit",
+    "source-plan": "agent-workspace-source-plan",
+    "source-start": "agent-workspace-source-start",
     "migration-repair-plan": "agent-migration-repair-plan",
     "migration-repair-start": "agent-migration-repair-start",
     "retirement-plan": "agent-retirement-plan",
@@ -37,7 +39,7 @@ def _print_help() -> None:
                 "",
                 "Usage:",
                 "  17deg-atlas workspace <init|plan|start> [options]",
-                "  17deg-atlas workspace <import-review|migration-source|migration-plan|migration-start|migration-review|migration-repair-plan|migration-repair-start|retirement-plan|retirement-start> [options]",
+                "  17deg-atlas workspace <import-review|source-plan|source-start|migration-source|migration-plan|migration-start|migration-review|migration-repair-plan|migration-repair-start|retirement-plan|retirement-start> [options]",
                 "  17deg-atlas knowledge <command> [options]",
                 "  17deg-atlas remote <command> [options]",
             )
@@ -99,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args or args[0] in ("-h", "--help"):
             print(
                 "Usage: 17deg-atlas workspace <init|plan|start> [options]\n"
-                "       17deg-atlas workspace <import-review|migration-source|migration-plan|migration-start|migration-review|migration-repair-plan|migration-repair-start|retirement-plan|retirement-start> [options]"
+                "       17deg-atlas workspace <import-review|source-plan|source-start|migration-source|migration-plan|migration-start|migration-review|migration-repair-plan|migration-repair-start|retirement-plan|retirement-start> [options]"
             )
             return 0
         action = args.pop(0)

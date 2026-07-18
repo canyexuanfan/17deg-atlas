@@ -34,6 +34,7 @@ from kb_vault.adapters.github_contents import GitHubContentsAdapter  # noqa: E40
 from kb_vault.hermes import handle_hermes_request  # noqa: E402
 from kb_vault.migration import (  # noqa: E402
     confirm_workspace_candidates,
+    dispose_workspace_source_materials,
     import_workspace_candidate,
     migrate_instance,
     migration_plan,
@@ -44,6 +45,7 @@ from kb_vault.migration import (  # noqa: E402
     retire_source,
     retirement_plan,
     workspace_completion_audit,
+    workspace_source_materials_plan,
 )
 from kb_vault.workspace_views import audit_workspace_views, build_workspace_views  # noqa: E402
 
@@ -318,6 +320,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="verify current source, semantic review, installation and Git sync state",
     )
     workspace_completion_parser.add_argument("--target", type=Path, required=True)
+
+    workspace_source_plan_parser = sub.add_parser(
+        "agent-workspace-source-plan",
+        help="choose what happens to verified originals after workspace import",
+    )
+    workspace_source_plan_parser.add_argument("--target", type=Path, required=True)
+
+    workspace_source_start_parser = sub.add_parser(
+        "agent-workspace-source-start",
+        help="preserve or delete verified originals after workspace import",
+    )
+    workspace_source_start_parser.add_argument("--target", type=Path, required=True)
+    workspace_source_start_parser.add_argument(
+        "--action", choices=("preserve", "delete"), required=True
+    )
+    workspace_source_start_parser.add_argument("--expected-source-root", default="")
+    workspace_source_start_parser.add_argument("--confirm-delete", action="store_true")
 
     migration_repair_plan_parser = sub.add_parser(
         "agent-migration-repair-plan",
@@ -1087,6 +1106,15 @@ def execute(args: argparse.Namespace) -> object:
         )
     if args.command == "agent-workspace-completion-audit":
         return workspace_completion_audit(args.target)
+    if args.command == "agent-workspace-source-plan":
+        return workspace_source_materials_plan(args.target)
+    if args.command == "agent-workspace-source-start":
+        return dispose_workspace_source_materials(
+            args.target,
+            action=args.action,
+            expected_source_root=args.expected_source_root,
+            confirm_delete=args.confirm_delete,
+        )
     if args.command == "agent-migration-repair-plan":
         return migration_repair_plan(args.target)
     if args.command == "agent-migration-repair-start":

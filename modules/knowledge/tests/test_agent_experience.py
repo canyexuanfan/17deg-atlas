@@ -51,9 +51,11 @@ from kb_vault.github_onboarding import (  # noqa: E402
 from kb_vault.io_utils import atomic_replace  # noqa: E402
 from kb_vault.migration import (  # noqa: E402
     confirm_workspace_candidates,
+    dispose_workspace_source_materials,
     import_workspace_candidate,
     migration_repair_plan,
     workspace_completion_audit,
+    workspace_source_materials_plan,
 )
 
 
@@ -524,8 +526,9 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertFalse(staged["onboarding_complete"])
         self.assertEqual([], fake.created)
         staged_copy = target / "knowledge" / "inbox" / "migration" / "workspace" / "questions" / original.name
-        self.assertEqual(original.read_bytes(), staged_copy.read_bytes())
-        self.assertEqual("ready-for-initial-sync", absorbed["terminal_state"])
+        self.assertFalse(staged_copy.exists())
+        self.assertTrue(absorbed["staging_copy_removed"])
+        self.assertEqual("needs-source-materials-selection", absorbed["terminal_state"])
         self.assertFalse(absorbed["retirement_required"])
         self.assertTrue(original.is_file())
         self.assertTrue(any((target / "knowledge" / "raw").rglob("*.md")))
@@ -535,6 +538,12 @@ class LocalAgentExperienceTests(unittest.TestCase):
         )
         self.assertEqual("verified", state["status"])
         self.assertEqual(0, state["semantic_import"]["pending_count"])
+        source_plan = workspace_source_materials_plan(target)
+        self.assertEqual("needs-source-materials-selection", source_plan["terminal_state"])
+        self.assertEqual(1, source_plan["snapshot"]["objects_verified"])
+        preserved = dispose_workspace_source_materials(target, action="preserve")
+        self.assertEqual("ready-for-initial-sync", preserved["terminal_state"])
+        self.assertTrue(original.is_file())
 
     def test_verified_workspace_import_reopens_only_new_or_changed_materials(self) -> None:
         if not self.age:
@@ -623,6 +632,10 @@ class LocalAgentExperienceTests(unittest.TestCase):
         by_path = {item["path"]: item for item in state["semantic_candidates"]}
         self.assertEqual("completed", by_path["questions/first.md"]["status"])
         self.assertEqual("pending", by_path["questions/second.md"]["status"])
+        inbox = target / "knowledge" / "inbox" / "migration" / "workspace" / "questions"
+        self.assertFalse((inbox / "first.md").exists())
+        self.assertTrue((inbox / "second.md").is_file())
+        self.assertNotIn("source_materials_disposition", state)
 
     def test_workspace_import_is_bound_to_confirmation_evidence_and_live_source(self) -> None:
         if not self.age:
@@ -695,7 +708,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 import_workspace_candidate(**common)
             original.write_text(source_content, encoding="utf-8")
             imported = import_workspace_candidate(**common)
-        self.assertEqual("ready-for-initial-sync", imported["terminal_state"])
+        self.assertEqual("needs-source-materials-selection", imported["terminal_state"])
         state = json.loads(
             (target / ".atlas" / "state" / "knowledge-migration.json").read_text(
                 encoding="utf-8"
@@ -709,6 +722,11 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual("knowledge", candidate["intended_role"])
         self.assertEqual(receipt, candidate["confirmation_id"])
         self.assertEqual(2, len(candidate["semantic_evidence"]))
+        audit_before_selection = workspace_completion_audit(target)
+        self.assertIn(
+            "source-materials-disposition-pending", audit_before_selection["issues"]
+        )
+        dispose_workspace_source_materials(target, action="preserve")
         audit_before_change = workspace_completion_audit(target)
         self.assertNotIn("source-materials-changed-after-review", audit_before_change["issues"])
         (questions / "late-note.md").write_text("A late source change.\n", encoding="utf-8")
@@ -718,6 +736,82 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual(
             ["questions/late-note.md"], audit_after_change["new_or_changed_source_paths"]
         )
+
+    def test_workspace_source_delete_keeps_local_git_snapshot_and_raw(self) -> None:
+        if not self.age:
+            self.skipTest("set KB_TEST_AGE or install age")
+        workspace = self.base / "delete-source-workspace"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        original = questions / "source.md"
+        source_text = "This original can be deleted only after Raw and snapshot verification.\n"
+        original.write_text(source_text, encoding="utf-8")
+        target = workspace / "alice-space"
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            github_first_setup(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                age_path=self.age,
+                run_self_test=False,
+                run_initial_sync=False,
+                existing_materials_action="import-review",
+                confirm_existing_materials_import=True,
+            )
+            confirmed = confirm_workspace_candidates(
+                target,
+                source_paths=["questions/source.md"],
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="knowledge",
+                wiki_compilation="compile",
+                confirm_semantic_decision=True,
+            )
+            import_workspace_candidate(
+                target,
+                source_path="questions/source.md",
+                confirmation_id=confirmed["receipts"][0]["confirmation_id"],
+                access="basic",
+                rights="owned",
+                origin_kind="self",
+                authorship_status="self_authored",
+                intended_role="knowledge",
+                summary=source_text.strip(),
+                card_question="When can the original be deleted?",
+                card_answer=source_text.strip(),
+                topic_names=["Source lifecycle"],
+                evidence_quotes=[source_text.strip()],
+                age_path=self.age,
+            )
+        plan = workspace_source_materials_plan(target)
+        original_bytes = original.read_bytes()
+        deleted = dispose_workspace_source_materials(
+            target,
+            action="delete",
+            expected_source_root=str(workspace.resolve()),
+            confirm_delete=True,
+        )
+        self.assertEqual(1, deleted["deleted_files"])
+        self.assertFalse(original.exists())
+        self.assertFalse(any((target / "knowledge" / "inbox").rglob("*.md")))
+        self.assertTrue(any((target / "knowledge" / "raw").rglob("*.md")))
+        snapshot = subprocess.run(
+            [
+                "git",
+                "-C",
+                plan["snapshot"]["repository_root"],
+                "show",
+                f"{plan['snapshot']['commit']}:questions/source.md",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(0, snapshot.returncode)
+        self.assertEqual(original_bytes, snapshot.stdout)
 
     def test_nonknowledge_workspace_material_is_routed_without_empty_module(self) -> None:
         if not self.age:
@@ -763,7 +857,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
                 confirm_route_outside_knowledge=True,
                 age_path=self.age,
             )
-        self.assertEqual("ready-for-initial-sync", routed["terminal_state"])
+        self.assertEqual("needs-source-materials-selection", routed["terminal_state"])
         self.assertEqual("creations", routed["target_module"])
         self.assertTrue(original.is_file())
         self.assertFalse((target / "creations").exists())
@@ -774,6 +868,7 @@ class LocalAgentExperienceTests(unittest.TestCase):
         self.assertEqual(1, state["semantic_import"]["candidate_count"])
         self.assertEqual(1, state["semantic_import"]["routed_count"])
         self.assertEqual(0, state["semantic_import"]["imported_count"])
+        dispose_workspace_source_materials(target, action="preserve")
 
     def test_github_first_reuses_single_existing_child_instance(self) -> None:
         if not self.age:

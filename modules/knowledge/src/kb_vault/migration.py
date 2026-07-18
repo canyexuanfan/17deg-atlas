@@ -183,6 +183,22 @@ def _git_commit(root: Path) -> str | None:
     return result.stdout.decode("utf-8", errors="replace").strip() or None
 
 
+def _git_repository_root(root: Path) -> Path | None:
+    result = _git(root, "rev-parse", "--show-toplevel")
+    if result.returncode != 0:
+        return None
+    value = result.stdout.decode("utf-8", errors="replace").strip()
+    return Path(value).resolve() if value else None
+
+
+def _git_path(root: Path, value: str) -> Path:
+    result = _git(root, "rev-parse", "--git-path", value)
+    if result.returncode != 0:
+        raise KBError("unable to resolve the local Git snapshot path")
+    path = Path(result.stdout.decode("utf-8", errors="replace").strip())
+    return (root / path).resolve() if not path.is_absolute() else path.resolve()
+
+
 def _path_relation(source: Path, target: Path) -> None:
     if source == target:
         raise KBError("migration source and target must be different")
@@ -393,6 +409,147 @@ def workspace_materials_plan(
     }
 
 
+def snapshot_workspace_materials(
+    source: str | Path,
+    target: str | Path,
+) -> dict[str, Any]:
+    """Create a local-only Git ref containing the exact pre-import source files."""
+    if not shutil.which("git"):
+        raise KBError("git is required to snapshot existing materials before import")
+    source_root = Path(source).expanduser().resolve()
+    target_root = Path(target).expanduser().resolve()
+    files = _workspace_material_files(source_root, target_root)
+    if not files:
+        raise KBError("no existing materials are available for a source snapshot")
+
+    repository_root = _git_repository_root(source_root)
+    created_repository = repository_root is None
+    if created_repository:
+        initialized = subprocess.run(
+            ["git", "init", "--initial-branch=main", str(source_root)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if initialized.returncode != 0:
+            raise KBError("unable to initialize the local source snapshot repository")
+        repository_root = source_root
+    assert repository_root is not None
+
+    try:
+        target_relative = target_root.relative_to(repository_root).as_posix()
+    except ValueError:
+        target_relative = ""
+    if target_relative:
+        exclude_path = _git_path(repository_root, "info/exclude")
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        current = exclude_path.read_text(encoding="utf-8") if exclude_path.is_file() else ""
+        exclusion = f"/{target_relative.rstrip('/')}/"
+        if exclusion not in current.splitlines():
+            exclude_path.write_text(
+                current + ("" if not current or current.endswith("\n") else "\n") + exclusion + "\n",
+                encoding="utf-8",
+            )
+
+    snapshot_seed = json.dumps(
+        {
+            "source": str(source_root),
+            "target": str(target_root),
+            "fingerprint": _workspace_material_fingerprint(files),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    snapshot_id = stable_token("snapshot", snapshot_seed)
+    reference = f"refs/atlas-snapshots/{snapshot_id}"
+    existing = _git(repository_root, "rev-parse", "--verify", reference)
+    if existing.returncode == 0:
+        commit = existing.stdout.decode("utf-8", errors="replace").strip()
+        return {
+            "status": "ok",
+            "snapshot_id": snapshot_id,
+            "reference": reference,
+            "commit": commit,
+            "repository_root": str(repository_root),
+            "created_repository": created_repository,
+            "candidate_count": len(files),
+            "fingerprint": _workspace_material_fingerprint(files),
+            "local_only": True,
+        }
+
+    index_path = _git_path(repository_root, f"atlas-snapshot-{snapshot_id}.index")
+    index_path.unlink(missing_ok=True)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "GIT_INDEX_FILE": str(index_path),
+            "GIT_AUTHOR_NAME": "17deg Atlas",
+            "GIT_AUTHOR_EMAIL": "snapshot@local.invalid",
+            "GIT_COMMITTER_NAME": "17deg Atlas",
+            "GIT_COMMITTER_EMAIL": "snapshot@local.invalid",
+        }
+    )
+
+    def run_snapshot(*arguments: str, input_bytes: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            ["git", "-C", str(repository_root), *arguments],
+            env=environment,
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    try:
+        if run_snapshot("read-tree", "--empty").returncode != 0:
+            raise KBError("unable to prepare the local source snapshot")
+        for item in files:
+            source_path = source_root / Path(str(item["path"]))
+            relative = source_path.relative_to(repository_root).as_posix()
+            blob = run_snapshot(
+                "hash-object", "-w", "--no-filters", str(source_path)
+            )
+            if blob.returncode != 0:
+                raise KBError("unable to write an exact source snapshot object")
+            blob_id = blob.stdout.decode("ascii", errors="ignore").strip()
+            indexed = run_snapshot(
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"100644,{blob_id},{relative}",
+            )
+            if indexed.returncode != 0:
+                raise KBError("unable to index an exact source snapshot object")
+        tree = run_snapshot("write-tree")
+        if tree.returncode != 0:
+            raise KBError("unable to write the local source snapshot tree")
+        commit_result = run_snapshot(
+            "commit-tree",
+            tree.stdout.decode("ascii", errors="ignore").strip(),
+            input_bytes="保存资料整理前快照\n".encode("utf-8"),
+        )
+        if commit_result.returncode != 0:
+            raise KBError("unable to commit the local source snapshot")
+        commit = commit_result.stdout.decode("ascii", errors="ignore").strip()
+        if _git(repository_root, "update-ref", reference, commit).returncode != 0:
+            raise KBError("unable to retain the local source snapshot reference")
+    finally:
+        index_path.unlink(missing_ok=True)
+
+    return {
+        "status": "ok",
+        "snapshot_id": snapshot_id,
+        "reference": reference,
+        "commit": commit,
+        "repository_root": str(repository_root),
+        "created_repository": created_repository,
+        "candidate_count": len(files),
+        "fingerprint": _workspace_material_fingerprint(files),
+        "local_only": True,
+    }
+
+
 def stage_workspace_materials(
     source: str | Path,
     target: str | Path,
@@ -400,6 +557,7 @@ def stage_workspace_materials(
     confirm_existing_materials_import: bool = False,
     planned_repository: str | None = None,
     age_path: str | Path | None = None,
+    source_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not confirm_existing_materials_import:
         raise KBError("existing material import requires explicit confirmation")
@@ -410,6 +568,11 @@ def stage_workspace_materials(
     plan = workspace_materials_plan(source_root, target_root)
     if not plan["candidate_count"]:
         raise KBError("no existing materials are available for review")
+    snapshot = dict(source_snapshot or snapshot_workspace_materials(source_root, target_root))
+    if snapshot.get("fingerprint") != _workspace_material_fingerprint(
+        _workspace_material_files(source_root, target_root)
+    ):
+        raise KBError("existing materials changed after the local source snapshot")
     state_path = target_root / MIGRATION_STATE
     existing = _read_json(state_path) or {}
     files = _workspace_material_files(source_root, target_root)
@@ -421,6 +584,9 @@ def stage_workspace_materials(
             and existing.get("status") in ("needs-semantic-review", "verified")
             and existing.get("source_fingerprint") == current_fingerprint
         ):
+            source_selection_required = not isinstance(
+                existing.get("source_materials_disposition"), Mapping
+            )
             return {
                 "status": "needs-action" if existing.get("status") != "verified" else "ok",
                 "flow": "knowledge-existing-materials",
@@ -431,7 +597,11 @@ def stage_workspace_materials(
                 "terminal_state": (
                     "needs-semantic-review"
                     if existing.get("status") != "verified"
-                    else "ready-for-initial-sync"
+                    else (
+                        "needs-source-materials-selection"
+                        if source_selection_required
+                        else "ready-for-initial-sync"
+                    )
                 ),
                 "next_action": (
                     "migration-review"
@@ -457,6 +627,7 @@ def stage_workspace_materials(
         "source_fingerprint": current_fingerprint,
         "source_repository": None,
         "source_commit": _git_commit(source_root),
+        "source_snapshot": snapshot,
         "target": str(target_root),
         "planned_repository": planned_repository,
         "started_at": _utc_now(),
@@ -464,9 +635,12 @@ def stage_workspace_materials(
         "semantic_candidates": [],
         "source_preserved": True,
         "retirement_required": False,
+        "source_materials_disposition_required": True,
     }
     state["status"] = "copying"
     state["source_fingerprint"] = current_fingerprint
+    state["source_snapshot"] = snapshot
+    state.pop("source_materials_disposition", None)
     if planned_repository:
         state["planned_repository"] = planned_repository
     _atomic_json(state_path, state)
@@ -483,16 +657,20 @@ def stage_workspace_materials(
         relative = str(item["path"])
         source_path = source_root / Path(relative)
         destination = inbox_root / Path(relative)
-        if not destination.is_file() or _sha256(destination) != item["sha256"]:
-            _copy_atomic(source_path, destination)
-        if _sha256(destination) != item["sha256"]:
-            raise KBError(f"existing material staging verification failed: {relative}")
         previous = candidates_by_path.get(relative, {})
         unchanged_finished = (
             previous.get("sha256") == item["sha256"]
             and previous.get("status") in ("completed", "routed")
         )
-        candidates_by_path[relative] = dict(previous) if unchanged_finished else {
+        if unchanged_finished:
+            candidates_by_path[relative] = dict(previous)
+            completed.add(relative)
+            continue
+        if not destination.is_file() or _sha256(destination) != item["sha256"]:
+            _copy_atomic(source_path, destination)
+        if _sha256(destination) != item["sha256"]:
+            raise KBError(f"existing material staging verification failed: {relative}")
+        candidates_by_path[relative] = {
                 "path": relative,
                 "staged_path": destination.relative_to(target_root).as_posix(),
                 "bytes": item["bytes"],
@@ -566,6 +744,36 @@ def stage_workspace_materials(
         "terminal_state": "needs-semantic-review",
         "next_action": "migration-review",
     }
+
+
+def _clean_completed_staging(target_root: Path, candidate: dict[str, Any]) -> bool:
+    staged_value = str(candidate.get("staged_path", ""))
+    if not staged_value:
+        candidate["staging_state"] = "cleaned"
+        return False
+    staged = (target_root / staged_value).resolve()
+    inbox_root = (
+        target_root / KNOWLEDGE_MODULE_RELATIVE / "inbox" / "migration"
+    ).resolve()
+    try:
+        staged.relative_to(inbox_root)
+    except ValueError as exc:
+        raise KBError("workspace staging path is outside the managed inbox") from exc
+    removed = False
+    if staged.exists():
+        if not staged.is_file() or _sha256(staged) != candidate.get("sha256"):
+            raise KBError("workspace staging cleanup verification failed")
+        staged.unlink()
+        removed = True
+    parent = staged.parent
+    while parent != inbox_root.parent and parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
+        if parent == inbox_root:
+            break
+        parent = parent.parent
+    candidate["staging_state"] = "cleaned"
+    candidate["staging_cleaned_at"] = _utc_now()
+    return removed
 
 
 def _semantic_completed_paths(state: Mapping[str, Any]) -> list[str]:
@@ -1284,10 +1492,17 @@ def record_migration_candidate(
         state["verified_at"] = _utc_now()
         state["verification"] = verification
     views = materialize_workspace_views(target_root, view_envelopes)
+    staging_removed = _clean_completed_staging(target_root, selected)
     _atomic_json(state_path, state)
     retirement_required = bool(state.get("retirement_required", True))
-    ready_terminal = (
-        "ready-for-retirement" if retirement_required else "ready-for-initial-sync"
+    source_selection_required = bool(
+        state.get("source_kind") == "workspace-materials"
+        and not isinstance(state.get("source_materials_disposition"), Mapping)
+    )
+    ready_terminal = "ready-for-retirement" if retirement_required else (
+        "needs-source-materials-selection"
+        if source_selection_required
+        else "ready-for-initial-sync"
     )
     return {
         "status": "ok" if not pending else "needs-semantic-review",
@@ -1303,8 +1518,10 @@ def record_migration_candidate(
             else 0
         ),
         "workspace_views": views,
+        "staging_copy_removed": staging_removed,
         "terminal_state": ready_terminal if not pending else "needs-semantic-review",
         "retirement_required": retirement_required,
+        "source_materials_selection_required": source_selection_required,
     }
 
 
@@ -1647,6 +1864,7 @@ def import_workspace_candidate(
             state["status"] = "verified"
             state["verified_at"] = _utc_now()
             state["verification"] = verification
+        staging_removed = _clean_completed_staging(target_root, selected)
         _atomic_json(target_root / MIGRATION_STATE, state)
         return {
             "status": "ok" if not pending else "needs-semantic-review",
@@ -1656,10 +1874,14 @@ def import_workspace_candidate(
             "source_preserved": True,
             "pending_count": len(pending),
             "migration_verified": not pending,
+            "staging_copy_removed": staging_removed,
             "terminal_state": (
-                "ready-for-initial-sync" if not pending else "needs-semantic-review"
+                "needs-source-materials-selection"
+                if not pending
+                else "needs-semantic-review"
             ),
             "retirement_required": False,
+            "source_materials_selection_required": not pending,
         }
     request_seed = f"workspace-import:{state.get('source_fingerprint', '')}:{source_path}"
     request_id = stable_token("req", request_seed)
@@ -1741,6 +1963,164 @@ def _migration_state(target: Path) -> dict[str, Any]:
     return state
 
 
+def _verify_workspace_source_snapshot(
+    state: Mapping[str, Any], candidates: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    snapshot = state.get("source_snapshot")
+    if not isinstance(snapshot, Mapping):
+        raise KBError("workspace source snapshot is unavailable")
+    repository_root = Path(str(snapshot.get("repository_root", ""))).expanduser().resolve()
+    reference = str(snapshot.get("reference", ""))
+    commit = str(snapshot.get("commit", ""))
+    if not repository_root.is_dir() or not reference or not commit:
+        raise KBError("workspace source snapshot receipt is incomplete")
+    resolved = _git(repository_root, "rev-parse", "--verify", reference)
+    if resolved.returncode != 0 or resolved.stdout.decode("ascii", errors="ignore").strip() != commit:
+        raise KBError("workspace source snapshot reference is unavailable")
+    source_root = Path(str(state.get("source", ""))).expanduser().resolve()
+    verified = 0
+    for candidate in candidates:
+        source_path = source_root / Path(str(candidate.get("path", "")))
+        try:
+            relative = source_path.relative_to(repository_root).as_posix()
+        except ValueError as exc:
+            raise KBError("workspace source snapshot path is outside its Git repository") from exc
+        content = _git(repository_root, "show", f"{commit}:{relative}")
+        if content.returncode != 0:
+            raise KBError("workspace source snapshot does not contain every imported file")
+        if hashlib.sha256(content.stdout).hexdigest() != candidate.get("sha256"):
+            raise KBError("workspace source snapshot content verification failed")
+        verified += 1
+    return {
+        "reference": reference,
+        "commit": commit,
+        "repository_root": str(repository_root),
+        "objects_verified": verified,
+        "local_only": True,
+    }
+
+
+def workspace_source_materials_plan(target: str | Path) -> dict[str, Any]:
+    target_root = Path(target).expanduser().resolve()
+    state = _read_json(target_root / MIGRATION_STATE)
+    if not isinstance(state, Mapping) or state.get("source_kind") != "workspace-materials":
+        raise KBError("workspace source disposition requires imported workspace materials")
+    if state.get("status") != "verified":
+        raise KBError("workspace materials must finish semantic review first")
+    candidates = [
+        item
+        for item in state.get("semantic_candidates", [])
+        if isinstance(item, Mapping) and item.get("status") in ("completed", "routed")
+    ]
+    if not candidates:
+        raise KBError("workspace source disposition has no completed materials")
+    snapshot = _verify_workspace_source_snapshot(state, candidates)
+    source_root = Path(str(state.get("source", ""))).expanduser().resolve()
+    existing: list[str] = []
+    changed: list[str] = []
+    for candidate in candidates:
+        relative = str(candidate.get("path", ""))
+        path = source_root / Path(relative)
+        if path.is_file() and _sha256(path) == candidate.get("sha256"):
+            existing.append(relative)
+        else:
+            changed.append(relative)
+    disposition = state.get("source_materials_disposition")
+    return {
+        "status": "ok" if isinstance(disposition, Mapping) else "needs-selection",
+        "flow": "knowledge-workspace-source-disposition",
+        "source": str(source_root),
+        "target": str(target_root),
+        "source_file_count": len(candidates),
+        "existing_source_count": len(existing),
+        "changed_or_missing": changed,
+        "snapshot": snapshot,
+        "selected": dict(disposition) if isinstance(disposition, Mapping) else None,
+        "options": [
+            {
+                "choice": "preserve",
+                "recommended": True,
+                "effect": "keep-original-files-at-their-current-paths",
+            },
+            {
+                "choice": "delete",
+                "recommended": False,
+                "effect": "delete-only-the-verified-imported-source-files",
+                "confirmation_required": ["confirm-source-material-files-delete"],
+            },
+        ],
+        "terminal_state": (
+            "ready-for-initial-sync"
+            if isinstance(disposition, Mapping)
+            else "needs-source-materials-selection"
+        ),
+    }
+
+
+def dispose_workspace_source_materials(
+    target: str | Path,
+    *,
+    action: str,
+    expected_source_root: str = "",
+    confirm_delete: bool = False,
+) -> dict[str, Any]:
+    if action not in ("preserve", "delete"):
+        raise KBError("workspace source disposition must be preserve or delete")
+    target_root = Path(target).expanduser().resolve()
+    state_path = target_root / MIGRATION_STATE
+    state = _read_json(state_path)
+    if not isinstance(state, dict):
+        raise KBError("workspace source disposition state is unavailable")
+    plan = workspace_source_materials_plan(target_root)
+    if plan["changed_or_missing"]:
+        raise KBError("workspace source files changed before disposition")
+    source_root = Path(plan["source"])
+    deleted = 0
+    if action == "delete":
+        if expected_source_root != str(source_root):
+            raise KBError("workspace source root must be repeated exactly before deletion")
+        if not confirm_delete:
+            raise KBError("workspace source file deletion requires explicit confirmation")
+        routed = [
+            str(item.get("path"))
+            for item in state.get("semantic_candidates", [])
+            if isinstance(item, Mapping) and item.get("status") == "routed"
+        ]
+        if routed:
+            raise KBError("routed source files must remain until their target module absorbs them")
+        for item in state.get("semantic_candidates", []):
+            if not isinstance(item, Mapping) or item.get("status") != "completed":
+                continue
+            path = (source_root / Path(str(item.get("path", "")))).resolve()
+            try:
+                path.relative_to(source_root)
+            except ValueError as exc:
+                raise KBError("workspace source deletion path is outside the source root") from exc
+            if path.is_file() and _sha256(path) == item.get("sha256"):
+                path.unlink()
+                deleted += 1
+                parent = path.parent
+                while parent != source_root and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+    result = {
+        "action": action,
+        "source_preserved": action == "preserve",
+        "deleted_files": deleted,
+        "snapshot_reference": plan["snapshot"]["reference"],
+        "snapshot_commit": plan["snapshot"]["commit"],
+        "completed_at": _utc_now(),
+    }
+    state["source_materials_disposition"] = result
+    _atomic_json(state_path, state)
+    return {
+        "status": "ok",
+        "flow": "knowledge-workspace-source-disposition",
+        **result,
+        "terminal_state": "ready-for-initial-sync",
+    }
+
+
 def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
     """Prove that semantic review is current immediately before a completion report."""
     target_root = Path(target).expanduser().resolve()
@@ -1754,6 +2134,13 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
         str(item.get("path"))
         for item in candidates
         if isinstance(item, Mapping) and item.get("status") not in ("completed", "routed")
+    ]
+    staging_residuals = [
+        str(item.get("staged_path"))
+        for item in candidates
+        if isinstance(item, Mapping)
+        and item.get("status") in ("completed", "routed")
+        and (target_root / str(item.get("staged_path", ""))).is_file()
     ]
     source_root = Path(str(state.get("source", ""))).expanduser().resolve()
     live_plan = workspace_materials_plan(source_root, target_root)
@@ -1788,6 +2175,10 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
         issues.append("migration-state-not-verified")
     if pending:
         issues.append("semantic-candidates-pending")
+    if staging_residuals:
+        issues.append("completed-staging-copies-remain")
+    if not isinstance(state.get("source_materials_disposition"), Mapping):
+        issues.append("source-materials-disposition-pending")
     if live_plan["candidate_count"]:
         issues.append("source-materials-changed-after-review")
     if residuals:
@@ -1802,6 +2193,8 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
             "local_commit": local_commit,
             "upstream_commit": upstream_commit,
             "pending": pending,
+            "staging_residuals": staging_residuals,
+            "source_materials_disposition": state.get("source_materials_disposition"),
             "issues": issues,
         },
         sort_keys=True,
@@ -1814,6 +2207,8 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
         "completion_audit_id": stable_token("completion", audit_seed),
         "issues": issues,
         "pending_count": len(pending),
+        "staging_residuals": staging_residuals,
+        "source_materials_disposition": state.get("source_materials_disposition"),
         "new_or_changed_source_count": live_plan["candidate_count"],
         "new_or_changed_source_paths": live_plan["sample_paths"],
         "install_residuals": residuals,

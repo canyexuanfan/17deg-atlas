@@ -354,6 +354,8 @@ class ProductizationAcceptanceTests(unittest.TestCase):
         self.assertIn("workspace migration-start", local_skill)
         self.assertIn("existing_materials.candidate_count", local_skill)
         self.assertIn("workspace import-review", local_skill)
+        self.assertIn("workspace source-plan", local_skill)
+        self.assertIn("workspace source-start", local_skill)
         self.assertIn("--target <已选目标目录>", local_skill)
         self.assertIn("--repository-name <已选仓库名>", local_skill)
         self.assertIn(".codex/backups/skills", local_skill)

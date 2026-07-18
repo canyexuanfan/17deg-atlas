@@ -44,6 +44,7 @@ from .registry import atlas_workspace, register_instance, registered_instances
 from .migration import (
     MIGRATION_STATE,
     migration_repair_plan,
+    snapshot_workspace_materials,
     stage_workspace_materials,
     workspace_materials_plan,
 )
@@ -1072,6 +1073,9 @@ def github_first_setup(
             if not confirm_existing_materials_import:
                 raise KBError("existing material import requires explicit confirmation")
             resolved_age = _preflight(resolved_dependency_age, require_git=False)
+            source_snapshot = snapshot_workspace_materials(
+                preliminary_materials["source"], preliminary_workspace["root"]
+            )
             local = local_setup(
                 preliminary_workspace["root"],
                 mode=mode,
@@ -1090,6 +1094,7 @@ def github_first_setup(
                 confirm_existing_materials_import=True,
                 planned_repository=planned_repository,
                 age_path=resolved_age,
+                source_snapshot=source_snapshot,
             )
             return {
                 **staged,
@@ -1189,6 +1194,9 @@ def github_first_setup(
                 confirm_existing_materials_import=True,
                 planned_repository=plan["repository"],
                 age_path=resolved_age,
+                source_snapshot=snapshot_workspace_materials(
+                    existing_materials["source"], root
+                ),
             )
             return {
                 **staged,
@@ -1242,6 +1250,13 @@ def github_first_setup(
         if migration_state.get("status") != "verified":
             raise KBError(
                 "migration semantic review must finish before initial GitHub sync"
+            )
+        if (
+            migration_state.get("source_kind") == "workspace-materials"
+            and not isinstance(migration_state.get("source_materials_disposition"), dict)
+        ):
+            raise KBError(
+                "choose whether to preserve or delete imported source files before initial GitHub sync"
             )
     resolved_age = _preflight(resolved_dependency_age, require_git=initialize_git)
     owner, repo = plan["repository"].split("/", 1)
