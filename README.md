@@ -48,7 +48,7 @@
 复制以下完整提示词给你的本地 Agent：
 
 ```
-请安装或更新并使用这个 Skill：https://github.com/canyexuanfan/17deg-atlas/tree/main/skills/17deg-atlas-local 。如果不能直接安装 GitHub 子目录，请自动克隆 https://github.com/canyexuanfan/17deg-atlas 并加载 `skills/17deg-atlas-local`，不要让我手工执行命令。默认把入口 Skill 安装到当前 Agent 支持的项目级隐藏 Skill 目录；克隆源码、`SKILL.md`、`skill.md`、`atlas.py`、`17deg-atlas.py` 和其他安装辅助文件都不得放在我的素材根目录或知识目录。除非我明确要求，不要安装为全局 Skill。更新旧 Skill 时，备份必须放在所有 Agent 扫描的 skills 目录之外，且同名可发现入口只能保留一个；开始盘点素材前先清理安装辅助文件，但不要删除我的真实资料。如果当前文件夹已存在我的素材，请先盘点，完成语义整理和必要的用户确认后再首次同步，不要只是复制文件。然后在当前设备为我创建或连接知识库；已有实例需要升级时，按照工具返回结果继续完成必要的整理和确认。需要 GitHub 操作时先向我确认；敏感凭据、公开或删除也必须先确认。不要自行改成纯本地流程。一直执行到工具确认本次流程完成。完成后直接向我报告，不要自行追加其他验收或安装。
+请安装或更新并使用这个 Skill：https://github.com/canyexuanfan/17deg-atlas/tree/main/skills/17deg-atlas-local 。如果不能直接安装 GitHub 子目录，请自动克隆 https://github.com/canyexuanfan/17deg-atlas 并加载 `skills/17deg-atlas-local`，不要让我手工执行命令。必须使用当前 Agent 官方支持的项目级 Skill 目录：Claude Code 或 Claudian 安装到 `.claude/skills/17deg-atlas-local`，Codex 安装到 `.codex/skills/17deg-atlas-local`；其他 Agent 使用其文档明确规定的项目级目录，不得自行发明 `.skills` 等目录。最终必须直接存在 `<项目级 Skill 目录>/17deg-atlas-local/SKILL.md`，完整源码缓存或嵌套路径不能冒充已经安装。需要克隆源码时放到项目 `.17deg-atlas/bootstrap-source` 等本地忽略目录，只把 `skills/17deg-atlas-local` 复制到正式 Skill 目录；`SKILL.md`、`skill.md`、`atlas.py`、`17deg-atlas.py` 和其他安装辅助文件都不得放在我的素材根目录或知识目录。除非我明确要求，不要安装为全局 Skill。更新旧 Skill 时，备份必须放在所有 Agent 扫描的 skills 目录之外，且同名可发现入口只能保留一个；开始盘点素材前先验证正式 Skill 路径并清理安装辅助文件，但不要删除我的真实资料。如果当前文件夹已存在我的素材，请先盘点，完成语义整理和必要的用户确认后再首次同步，不要只是复制文件。然后在当前设备为我创建或连接知识库；已有实例需要升级时，按照工具返回结果继续完成必要的整理和确认。需要 GitHub 操作时先向我确认；敏感凭据、公开或删除也必须先确认。不要自行改成纯本地流程。一直执行到工具确认本次流程完成。完成后直接向我报告，不要自行追加其他验收或安装。
 ```
 
 ### 远端 Agent 完整提示词
