@@ -116,6 +116,11 @@ WORKSPACE_CONTROL_FILES = {
     "security.md",
     "欢迎.md",
 }
+WORKSPACE_INSTALL_RESIDUAL_FILES = (
+    "skill.md",
+    "17deg-atlas.py",
+    "atlas.py",
+)
 
 
 def _utc_now() -> str:
@@ -146,6 +151,96 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return dict(value) if isinstance(value, dict) else None
+
+
+def _small_text(path: Path) -> str:
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            return ""
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _git_tracks_path(root: Path, relative: str) -> bool:
+    if not (root / ".git").exists():
+        return False
+    result = _git(root, "ls-files", "--error-unmatch", "--", relative)
+    return result.returncode == 0
+
+
+def _workspace_install_residuals(source: Path) -> list[dict[str, Any]]:
+    """Recognize a complete, untracked Atlas entry bundle left in a content root.
+
+    File names alone are deliberately insufficient: a user's real ``skill.md`` must
+    remain eligible for import.  The bundle is recognized only when both the local
+    entry Skill and the repository launcher match their product signatures.
+    """
+    source = source.expanduser().resolve()
+    skill = source / WORKSPACE_INSTALL_RESIDUAL_FILES[0]
+    launcher = source / WORKSPACE_INSTALL_RESIDUAL_FILES[1]
+    skill_text = _small_text(skill) if skill.is_file() else ""
+    launcher_text = _small_text(launcher) if launcher.is_file() else ""
+    skill_matches = (
+        "name: 17deg-atlas-local" in skill_text
+        and "# 17deg Atlas Local" in skill_text
+        and "scripts/atlas.py" in skill_text
+    )
+    launcher_matches = (
+        "MODULE_ROOT = REPOSITORY_ROOT / \"modules\" / \"knowledge\"" in launcher_text
+        and "from kb_vault.atlas_cli import main" in launcher_text
+    )
+    if not skill_matches or not launcher_matches:
+        return []
+    if _git_tracks_path(source, "skill.md") or _git_tracks_path(source, "17deg-atlas.py"):
+        return []
+
+    recognized = [skill, launcher]
+    helper = source / WORKSPACE_INSTALL_RESIDUAL_FILES[2]
+    helper_text = _small_text(helper) if helper.is_file() else ""
+    helper_matches = helper_text.strip() == "404: Not Found" or (
+        "17deg-atlas.py" in helper_text and ("runpy" in helper_text or "subprocess" in helper_text)
+    )
+    if helper_matches and not _git_tracks_path(source, "atlas.py"):
+        recognized.append(helper)
+    return [
+        {
+            "path": path.name,
+            "bytes": path.stat().st_size,
+            "sha256": _sha256(path),
+            "reason": "recognized-untracked-atlas-install-residual",
+        }
+        for path in recognized
+    ]
+
+
+def _quarantine_workspace_install_residuals(source: Path) -> dict[str, Any]:
+    residuals = _workspace_install_residuals(source)
+    if not residuals:
+        return {"status": "none", "files": [], "quarantine": None}
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    quarantine = source / ".17deg-atlas" / "install-residuals" / timestamp
+    sequence = 1
+    while quarantine.exists():
+        sequence += 1
+        quarantine = source / ".17deg-atlas" / "install-residuals" / f"{timestamp}-{sequence}"
+    quarantine.mkdir(parents=True, exist_ok=False)
+    moved: list[dict[str, Any]] = []
+    for item in residuals:
+        source_path = source / str(item["path"])
+        destination = quarantine / source_path.name
+        source_path.replace(destination)
+        moved.append({**item, "quarantined_path": destination.relative_to(source).as_posix()})
+    receipt = {
+        "status": "quarantined",
+        "created_at": _utc_now(),
+        "source": str(source),
+        "quarantine": str(quarantine),
+        "files": moved,
+        "reversible": True,
+    }
+    _atomic_json(quarantine / "receipt.json", receipt)
+    return receipt
 
 
 def _layout(root: Path) -> str:
@@ -256,6 +351,9 @@ def _workspace_material_files(source: Path, target: Path) -> list[dict[str, Any]
     files: list[dict[str, Any]] = []
     source = source.expanduser().resolve()
     target = target.expanduser().resolve()
+    install_residual_paths = {
+        str(item["path"]).casefold() for item in _workspace_install_residuals(source)
+    }
     for current, directory_names, file_names in os.walk(source, topdown=True):
         current_path = Path(current).resolve()
         retained_directories: list[str] = []
@@ -280,6 +378,8 @@ def _workspace_material_files(source: Path, target: Path) -> list[dict[str, Any]
             if path.is_symlink() or name.startswith("."):
                 continue
             relative = path.relative_to(source).as_posix()
+            if relative.casefold() in install_residual_paths:
+                continue
             if len(Path(relative).parts) == 1 and name.casefold() in WORKSPACE_CONTROL_FILES:
                 continue
             if path.suffix.casefold() not in WORKSPACE_CONTENT_SUFFIXES:
@@ -344,6 +444,7 @@ def workspace_materials_plan(
             "required_inputs": [],
         }
     files = _workspace_material_files(source_root, target_root)
+    install_residuals = _workspace_install_residuals(source_root)
     migration_state = _read_json(target_root / MIGRATION_STATE) or {}
     absorbed: dict[str, Mapping[str, Any]] = {}
     if (
@@ -388,6 +489,10 @@ def workspace_materials_plan(
         "fingerprint": _workspace_material_fingerprint(files),
         "groups": [grouped[name] for name in sorted(grouped, key=str.casefold)],
         "sample_paths": [str(item["path"]) for item in candidate_files[:10]],
+        "install_residuals": install_residuals,
+        "install_residual_action": (
+            "quarantine-before-import" if install_residuals else "none"
+        ),
         "confirmation_required": ["choose-existing-materials-action"] if count else [],
         "required_inputs": ["existing-materials-action"] if count else [],
         "action_options": (
@@ -565,6 +670,7 @@ def stage_workspace_materials(
     target_root = Path(target).expanduser().resolve()
     if not is_personal_domain_root(target_root):
         raise KBError("existing materials require an initialized personal workspace")
+    install_residual_cleanup = _quarantine_workspace_install_residuals(source_root)
     plan = workspace_materials_plan(source_root, target_root)
     if not plan["candidate_count"]:
         raise KBError("no existing materials are available for review")
@@ -610,6 +716,7 @@ def stage_workspace_materials(
                 ),
                 "repository_creation_deferred": existing.get("status") != "verified",
                 "initial_sync_deferred": existing.get("status") != "verified",
+                "install_residual_cleanup": install_residual_cleanup,
             }
         if not (
             existing.get("source_kind") == "workspace-materials"
@@ -733,6 +840,7 @@ def stage_workspace_materials(
         "groups": plan["groups"],
         "sample_paths": plan["sample_paths"],
         "source_preserved": True,
+        "install_residual_cleanup": install_residual_cleanup,
         "repository_creation_deferred": True,
         "initial_sync_deferred": True,
         "batch_questions": [
@@ -2145,6 +2253,10 @@ def workspace_completion_audit(target: str | Path) -> dict[str, Any]:
     source_root = Path(str(state.get("source", ""))).expanduser().resolve()
     live_plan = workspace_materials_plan(source_root, target_root)
     residuals: list[str] = []
+    residuals.extend(
+        str(source_root / str(item["path"]))
+        for item in _workspace_install_residuals(source_root)
+    )
     for agent_root in (".codex", ".claudian", ".agents"):
         reference = source_root / agent_root / "reference"
         if not reference.is_dir():

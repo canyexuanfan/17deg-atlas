@@ -54,6 +54,7 @@ from kb_vault.migration import (  # noqa: E402
     dispose_workspace_source_materials,
     import_workspace_candidate,
     migration_repair_plan,
+    stage_workspace_materials,
     workspace_completion_audit,
     workspace_source_materials_plan,
 )
@@ -435,6 +436,77 @@ class LocalAgentExperienceTests(unittest.TestCase):
             "continue-without-importing-existing-materials", leave_option["effect"]
         )
         self.assertEqual([], fake.created)
+
+    def test_untracked_atlas_install_bundle_is_quarantined_not_imported(self) -> None:
+        workspace = self.base / "workspace-with-install-residuals"
+        questions = workspace / "questions"
+        questions.mkdir(parents=True)
+        for index in range(1, 4):
+            (questions / f"note-{index}.md").write_text(
+                f"User material {index}.\n", encoding="utf-8"
+            )
+        (workspace / "skill.md").write_text(
+            (REPOSITORY_ROOT / "skills" / "17deg-atlas-local" / "SKILL.md").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        (workspace / "17deg-atlas.py").write_text(
+            (REPOSITORY_ROOT / "scripts" / "17deg-atlas.py").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (workspace / "atlas.py").write_text("404: Not Found\n", encoding="utf-8")
+        target = workspace / "alice-space"
+        initialize_personal_domain(target)
+
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            plan = github_first_plan(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                run_initial_sync=False,
+            )
+        self.assertEqual(3, plan["existing_materials"]["candidate_count"])
+        self.assertEqual(
+            ["17deg-atlas.py", "atlas.py", "skill.md"],
+            sorted(item["path"] for item in plan["existing_materials"]["install_residuals"]),
+        )
+
+        staged = stage_workspace_materials(
+            workspace,
+            target,
+            confirm_existing_materials_import=True,
+            planned_repository="alice-space",
+        )
+        self.assertEqual(3, staged["total_candidate_count"])
+        self.assertEqual("quarantined", staged["install_residual_cleanup"]["status"])
+        self.assertFalse((workspace / "skill.md").exists())
+        self.assertFalse((workspace / "17deg-atlas.py").exists())
+        self.assertFalse((workspace / "atlas.py").exists())
+        quarantine = Path(staged["install_residual_cleanup"]["quarantine"])
+        self.assertTrue((quarantine / "skill.md").is_file())
+        self.assertTrue((quarantine / "17deg-atlas.py").is_file())
+        self.assertTrue((quarantine / "atlas.py").is_file())
+        self.assertTrue((quarantine / "receipt.json").is_file())
+
+    def test_user_skill_document_without_install_bundle_remains_importable(self) -> None:
+        workspace = self.base / "workspace-with-user-skill-note"
+        workspace.mkdir()
+        (workspace / "skill.md").write_text(
+            "# My skill notes\n\nThis is user-authored knowledge.\n", encoding="utf-8"
+        )
+        target = workspace / "alice-space"
+        with mock.patch.dict(os.environ, {"ATLAS_WORKSPACE": str(workspace)}, clear=False):
+            plan = github_first_plan(
+                target,
+                runtime="local",
+                repository_name="alice-space",
+                client=self.FakeGitHub(),
+                run_initial_sync=False,
+            )
+        self.assertEqual(1, plan["existing_materials"]["candidate_count"])
+        self.assertEqual(["skill.md"], plan["existing_materials"]["sample_paths"])
 
     def test_existing_instance_still_detects_unabsorbed_parent_materials(self) -> None:
         workspace = self.base / "existing-target-with-materials"
